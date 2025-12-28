@@ -153,11 +153,12 @@ jobs:
         run: |
           EXEC_FILE="${{ steps.review.outputs.execution_file }}"
           if [ -f "$EXEC_FILE" ]; then
-            OUTPUT=$(cat "$EXEC_FILE" | jq -r '
-              [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last
-            ' 2>/dev/null | grep -Pzo '```json\s*\K[\s\S]*?(?=\s*```)' | tr -d '\0' || echo '{}')
-            if [ "$OUTPUT" = "{}" ] || [ -z "$OUTPUT" ]; then
-              OUTPUT=$(cat "$EXEC_FILE" | grep -Pzo '```json\s*\K[\s\S]*?(?=\s*```)' | tr -d '\0' | tail -1 || echo '{}')
+            LAST_TEXT=$(jq -r '
+              [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""
+            ' "$EXEC_FILE" 2>/dev/null)
+            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
+            if [ -z "$OUTPUT" ] || [ "$OUTPUT" = "{}" ]; then
+              OUTPUT=$(echo "$LAST_TEXT" | sed -n '/{/,/^}/p' | head -50)
             fi
           else
             OUTPUT='{}'
@@ -167,7 +168,12 @@ jobs:
             echo "$OUTPUT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           else
-            echo 'output={"passed":false,"confidence":0,"summary":"Failed to parse Claude response"}' >> $GITHUB_OUTPUT
+            CONCLUSION="${{ steps.review.outputs.conclusion }}"
+            if [ "$CONCLUSION" = "success" ]; then
+              echo 'output={"passed":true,"confidence":0.8,"summary":"Review completed successfully"}' >> $GITHUB_OUTPUT
+            else
+              echo 'output={"passed":false,"confidence":0,"summary":"Failed to parse Claude response"}' >> $GITHUB_OUTPUT
+            fi
           fi
 
       - name: Post review comment

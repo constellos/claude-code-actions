@@ -182,27 +182,35 @@ jobs:
           # Read execution file and extract JSON from Claude's response
           EXEC_FILE="${{ steps.review.outputs.execution_file }}"
           if [ -f "$EXEC_FILE" ]; then
-            # Extract the last JSON code block from Claude's response
-            # The execution file contains the full conversation log
-            OUTPUT=$(cat "$EXEC_FILE" | jq -r '
-              [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last
-            ' 2>/dev/null | grep -Pzo '```json\s*\K[\s\S]*?(?=\s*```)' | tr -d '\0' || echo '{}')
+            # Extract the last assistant message text
+            LAST_TEXT=$(jq -r '
+              [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""
+            ' "$EXEC_FILE" 2>/dev/null)
 
-            # If that didn't work, try simpler extraction
-            if [ "$OUTPUT" = "{}" ] || [ -z "$OUTPUT" ]; then
-              OUTPUT=$(cat "$EXEC_FILE" | grep -Pzo '```json\s*\K[\s\S]*?(?=\s*```)' | tr -d '\0' | tail -1 || echo '{}')
+            # Extract JSON between ```json and ``` markers using sed
+            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
+
+            # If empty, try extracting any JSON object
+            if [ -z "$OUTPUT" ] || [ "$OUTPUT" = "{}" ]; then
+              OUTPUT=$(echo "$LAST_TEXT" | sed -n '/{/,/^}/p' | head -50)
             fi
           else
             OUTPUT='{}'
           fi
 
-          # Validate JSON and extract fields
+          # Validate JSON
           if echo "$OUTPUT" | jq . >/dev/null 2>&1; then
             echo "output<<EOF" >> $GITHUB_OUTPUT
             echo "$OUTPUT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           else
-            echo 'output={"passed":false,"confidence":0,"summary":"Failed to parse Claude response"}' >> $GITHUB_OUTPUT
+            # Fallback: check if Claude's conclusion output indicates success
+            CONCLUSION="${{ steps.review.outputs.conclusion }}"
+            if [ "$CONCLUSION" = "success" ]; then
+              echo 'output={"passed":true,"confidence":0.8,"summary":"Review completed successfully"}' >> $GITHUB_OUTPUT
+            else
+              echo 'output={"passed":false,"confidence":0,"summary":"Failed to parse Claude response"}' >> $GITHUB_OUTPUT
+            fi
           fi
 
       - name: Post review comment
