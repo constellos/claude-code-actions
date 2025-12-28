@@ -66,9 +66,9 @@ jobs:
 
       - name: Agents Review with Claude
         id: review
-        uses: anthropics/claude-code-base-action@v1
+        uses: anthropics/claude-code-base-action@beta
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*)"
           max_turns: 15
           prompt: |
