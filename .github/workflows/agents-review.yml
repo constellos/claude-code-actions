@@ -1,0 +1,209 @@
+name: Agents Review
+
+# Reviews .claude/agents/*.md files for context optimization
+# Ensures agents are well-defined with proper capabilities and descriptions
+# Advises on agent improvements - DOES NOT edit files
+
+on:
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - '.claude/agents/**'
+      - 'agents/**'
+      - '**/agents/*.md'
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: agents-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agents-review:
+    runs-on: ubuntu-latest
+    outputs:
+      review_passed: ${{ steps.review.outputs.passed }}
+      structured_output: ${{ steps.review.outputs.structured_output }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract context
+        id: context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="${{ github.head_ref || github.ref_name }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          # Extract issue number
+          ISSUE_NUMBER=""
+          if [[ $BRANCH_NAME =~ ^(feature|fix|bugfix|hotfix)/([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+          elif [[ $BRANCH_NAME =~ ^([0-9]+)- ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+          fi
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+          # Get changed agent files
+          CHANGED_AGENTS=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' | grep -E '(agents/.*\.md|AGENT\.md)' || echo "")
+          echo "$CHANGED_AGENTS" > /tmp/changed_agents.txt
+          echo "changed_agents=$CHANGED_AGENTS" >> $GITHUB_OUTPUT
+
+      - name: Get issue context
+        if: steps.context.outputs.issue_number != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue view ${{ steps.context.outputs.issue_number }} --json title,body,comments > /tmp/issue.json 2>/dev/null || echo "{}" > /tmp/issue.json
+
+      - name: Agents Review with Claude
+        id: review
+        uses: anthropics/claude-code-base-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*)"
+          max_turns: 15
+          prompt: |
+            # Agents Review Agent
+
+            You are an agents review specialist focused on context optimization. Your job is to review .claude/agents/*.md files for quality, completeness, and context efficiency.
+
+            ## Context
+            - Branch: ${{ steps.context.outputs.branch_name }}
+            - Issue: ${{ steps.context.outputs.issue_number }}
+            - Changed Agents: Read /tmp/changed_agents.txt
+
+            ## Agent Quality Criteria
+
+            1. **Frontmatter Requirements**:
+               - `description`: Clear, concise purpose (1-2 sentences)
+               - `capabilities`: Array of specific capabilities
+               - Optional: `color`, `model`, `tools`
+
+            2. **Content Structure**:
+               - Clear heading with agent name
+               - Detailed description of role and expertise
+               - When to use (triggering conditions)
+               - What the agent does (step-by-step)
+               - What it doesn't do (boundaries)
+
+            3. **Context Optimization**:
+               - Is the description too verbose? (wastes context tokens)
+               - Is it too vague? (causes confusion)
+               - Are capabilities specific and actionable?
+               - Does it avoid duplicating system knowledge?
+               - Does it focus on domain-specific guidance?
+
+            4. **Integration Quality**:
+               - Does the when-to-use section help Claude decide correctly?
+               - Are there clear boundaries to prevent scope creep?
+               - Is the agent focused on ONE specialized domain?
+
+            ## Your Task
+
+            1. Read each changed agent file
+            2. Evaluate against the criteria above
+            3. Check if issue context suggests any needed updates
+            4. Identify context optimization opportunities
+            5. Provide specific, actionable suggestions
+
+            ## IMPORTANT RULES
+
+            - **DO NOT edit any files** - you are a reviewer only
+            - Focus on context optimization (smaller = better if equally clear)
+            - Prefer specific examples over abstract descriptions
+            - Flag agents that try to do too much (should be split)
+
+            ## Output Format
+
+            Provide agent-by-agent analysis, then overall assessment.
+
+          claude_args: |
+            --json-schema '{"type":"object","properties":{"passed":{"type":"boolean"},"confidence":{"type":"number","minimum":0,"maximum":1},"agent_evaluations":{"type":"array","items":{"type":"object","properties":{"agent_file":{"type":"string"},"frontmatter_valid":{"type":"boolean"},"context_score":{"type":"number","minimum":1,"maximum":10,"description":"1=bloated, 10=optimally concise"},"clarity_score":{"type":"number","minimum":1,"maximum":10},"focus_score":{"type":"number","minimum":1,"maximum":10,"description":"1=too broad, 10=well-focused"},"issues":{"type":"array","items":{"type":"string"}},"suggestions":{"type":"array","items":{"type":"string"}}}}},"optimization_opportunities":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"}},"required":["passed","confidence","summary"]}'
+
+      - name: Post review comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          CONFIDENCE=$(echo "$OUTPUT" | jq -r '.confidence')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary')
+
+          if [ "$PASSED" = "true" ]; then
+            STATUS_ICON=":white_check_mark:"
+            STATUS_TEXT="PASSED"
+          else
+            STATUS_ICON=":warning:"
+            STATUS_TEXT="NEEDS IMPROVEMENT"
+          fi
+
+          COMMENT_BODY="## Agents Review ${STATUS_ICON} ${STATUS_TEXT}
+
+          **Confidence:** ${CONFIDENCE}
+
+          ### Summary
+          ${SUMMARY}
+          "
+
+          # Add agent evaluations
+          echo "$OUTPUT" | jq -r '.agent_evaluations[]? | "### \(.agent_file)\n- **Context Score:** \(.context_score)/10\n- **Clarity Score:** \(.clarity_score)/10\n- **Focus Score:** \(.focus_score)/10\n- **Frontmatter Valid:** \(.frontmatter_valid)\n\n**Issues:**\n\(.issues | if length > 0 then map(\"- \" + .) | join(\"\n\") else \"None\" end)\n\n**Suggestions:**\n\(.suggestions | if length > 0 then map(\"- \" + .) | join(\"\n\") else \"None\" end)\n"' 2>/dev/null | while IFS= read -r line; do
+            COMMENT_BODY="${COMMENT_BODY}${line}
+          "
+          done
+
+          # Add optimization opportunities
+          OPTS=$(echo "$OUTPUT" | jq -r '.optimization_opportunities // [] | .[]' 2>/dev/null)
+          if [ -n "$OPTS" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Context Optimization Opportunities
+          $(echo "$OPTS" | while read -r opt; do echo "- :zap: $opt"; done)
+          "
+          fi
+
+          COMMENT_BODY="${COMMENT_BODY}
+
+          ---
+          *Automated Agents Review by Claude Code*"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+
+      - name: Set commit status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary' | head -c 140)
+
+          if [ "$PASSED" = "true" ]; then
+            STATE="success"
+            DESCRIPTION="Agents review passed"
+          else
+            STATE="failure"
+            DESCRIPTION="Agents need improvement"
+          fi
+
+          gh api repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -f state="$STATE" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="$DESCRIPTION" \
+            -f context="Agents Review"
+
+      - name: Fail if review failed
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+
+          if [ "$PASSED" != "true" ]; then
+            echo "::warning::Agents review identified improvements needed. See PR comment."
+            exit 1
+          fi

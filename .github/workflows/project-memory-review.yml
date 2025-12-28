@@ -1,0 +1,263 @@
+name: Project Memory Review
+
+# Reviews CLAUDE.md files (project memory) for rule compliance
+# Checks main CLAUDE.md and any folder CLAUDE.md files touched by commits
+# Returns errors if rules/requirements not met - DOES NOT edit files
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!main'
+    paths:
+      - 'CLAUDE.md'
+      - '**/CLAUDE.md'
+      - '.claude/**'
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - 'CLAUDE.md'
+      - '**/CLAUDE.md'
+      - '.claude/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: project-memory-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  project-memory-review:
+    runs-on: ubuntu-latest
+    outputs:
+      review_passed: ${{ steps.review.outputs.passed }}
+      structured_output: ${{ steps.review.outputs.structured_output }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract context
+        id: context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="${{ github.head_ref || github.ref_name }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          # Extract issue number
+          ISSUE_NUMBER=""
+          if [[ $BRANCH_NAME =~ ^(feature|fix|bugfix|hotfix)/([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+          elif [[ $BRANCH_NAME =~ ^([0-9]+)- ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+          fi
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+          # Get all changed files
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > /tmp/all_changed_files.txt
+          else
+            git diff --name-only HEAD~1 HEAD > /tmp/all_changed_files.txt 2>/dev/null || echo "" > /tmp/all_changed_files.txt
+          fi
+
+          # Find touched CLAUDE.md files
+          grep -E '(^|/)CLAUDE\.md$' /tmp/all_changed_files.txt > /tmp/changed_claude_files.txt || echo "" > /tmp/changed_claude_files.txt
+
+          # Find folders touched by the commit (to check their CLAUDE.md files)
+          cat /tmp/all_changed_files.txt | while read -r file; do
+            dir=$(dirname "$file")
+            while [ "$dir" != "." ]; do
+              if [ -f "$dir/CLAUDE.md" ]; then
+                echo "$dir/CLAUDE.md"
+              fi
+              dir=$(dirname "$dir")
+            done
+          done | sort -u > /tmp/folder_claude_files.txt
+
+          # Combine touched and folder CLAUDE.md files
+          cat /tmp/changed_claude_files.txt /tmp/folder_claude_files.txt | sort -u > /tmp/relevant_claude_files.txt
+
+          # Always include root CLAUDE.md if it exists
+          if [ -f "CLAUDE.md" ]; then
+            echo "CLAUDE.md" >> /tmp/relevant_claude_files.txt
+          fi
+
+          sort -u /tmp/relevant_claude_files.txt -o /tmp/relevant_claude_files.txt
+
+      - name: Get issue context
+        if: steps.context.outputs.issue_number != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue view ${{ steps.context.outputs.issue_number }} --json title,body,comments > /tmp/issue.json 2>/dev/null || echo "{}" > /tmp/issue.json
+
+      - name: Get PR comments
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr view ${{ github.event.pull_request.number }} --json comments,reviews > /tmp/pr_comments.json 2>/dev/null || echo "{}" > /tmp/pr_comments.json
+
+      - name: Project Memory Review with Claude
+        id: review
+        uses: anthropics/claude-code-base-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*),Bash(git diff:*),Bash(git log:*)"
+          max_turns: 20
+          prompt: |
+            # Project Memory Review Agent
+
+            You are a project memory review agent. Your job is to verify that code changes comply with the rules and requirements documented in CLAUDE.md files.
+
+            ## Context
+            - Branch: ${{ steps.context.outputs.branch_name }}
+            - Issue: ${{ steps.context.outputs.issue_number }}
+
+            ## Your Task
+
+            1. **Identify relevant CLAUDE.md files**:
+               - Read /tmp/relevant_claude_files.txt for list of CLAUDE.md files to check
+               - Read /tmp/all_changed_files.txt for all files changed in this commit
+
+            2. **For each CLAUDE.md file**:
+               - Read the CLAUDE.md content
+               - Extract rules and requirements from it
+               - Identify which changed files should comply with these rules
+               - Check if the changes comply with the documented requirements
+
+            3. **Check for needed updates**:
+               - Read /tmp/issue.json for linked issue context
+               - Read /tmp/pr_comments.json for PR feedback
+               - Based on issue/comments, identify if CLAUDE.md files need updating
+
+            4. **Evaluate compliance**:
+               - For each rule in each CLAUDE.md:
+                 - Is it met by the code changes?
+                 - Are there violations?
+                 - Should the rule be updated based on issue context?
+
+            5. **Make your decision**:
+               - PASS: All documented rules/requirements met
+               - FAIL: Rule violations found or critical updates needed
+
+            ## CLAUDE.md Structure
+
+            CLAUDE.md files typically contain:
+            - Frontmatter with metadata (folder structure, allowed files, etc.)
+            - Project description and architecture
+            - Development rules and guidelines
+            - Technology-specific requirements
+            - Best practices to follow
+
+            ## IMPORTANT RULES
+
+            - **DO NOT edit any files** - you are a reviewer only
+            - Check both root CLAUDE.md and folder-specific ones
+            - Folder CLAUDE.md rules apply to files in that folder
+            - Suggest documentation updates if issue context indicates needs
+            - Be specific about which rules are violated and where
+
+            ## Output Format
+
+            Provide file-by-file analysis, then overall compliance assessment.
+
+          claude_args: |
+            --json-schema '{"type":"object","properties":{"passed":{"type":"boolean"},"confidence":{"type":"number","minimum":0,"maximum":1},"claude_file_evaluations":{"type":"array","items":{"type":"object","properties":{"claude_file":{"type":"string"},"rules_extracted":{"type":"array","items":{"type":"string"}},"rules_met":{"type":"array","items":{"type":"string"}},"rules_violated":{"type":"array","items":{"type":"object","properties":{"rule":{"type":"string"},"violation":{"type":"string"},"affected_files":{"type":"array","items":{"type":"string"}}}}},"update_suggestions":{"type":"array","items":{"type":"string"}}}}},"documentation_updates_needed":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"reason":{"type":"string"},"suggested_change":{"type":"string"}}}},"blocking_violations":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"}},"required":["passed","confidence","summary"]}'
+
+      - name: Post review comment
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          CONFIDENCE=$(echo "$OUTPUT" | jq -r '.confidence')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary')
+
+          if [ "$PASSED" = "true" ]; then
+            STATUS_ICON=":white_check_mark:"
+            STATUS_TEXT="PASSED"
+          else
+            STATUS_ICON=":x:"
+            STATUS_TEXT="FAILED"
+          fi
+
+          COMMENT_BODY="## Project Memory Review ${STATUS_ICON} ${STATUS_TEXT}
+
+          **Confidence:** ${CONFIDENCE}
+
+          ### Summary
+          ${SUMMARY}
+          "
+
+          # Add file evaluations
+          echo "$OUTPUT" | jq -r '.claude_file_evaluations[]? | "### \(.claude_file)\n\n**Rules Extracted:** \(.rules_extracted | length)\n\n**Rules Met:**\n\(.rules_met | if length > 0 then map(\"- :white_check_mark: \" + .) | join(\"\n\") else \"None specified\" end)\n\n**Violations:**\n\(.rules_violated | if length > 0 then map(\"- :x: **\" + .rule + \"**: \" + .violation + \" (Files: \" + (.affected_files | join(\", \")) + \")\") | join(\"\n\") else \"None\" end)\n"' 2>/dev/null | while IFS= read -r line; do
+            COMMENT_BODY="${COMMENT_BODY}${line}
+          "
+          done
+
+          # Add blocking violations
+          BLOCKING=$(echo "$OUTPUT" | jq -r '.blocking_violations // [] | .[]' 2>/dev/null)
+          if [ -n "$BLOCKING" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### :rotating_light: Blocking Violations
+          $(echo "$BLOCKING" | while read -r v; do echo "- $v"; done)
+          "
+          fi
+
+          # Add documentation update suggestions
+          DOC_UPDATES=$(echo "$OUTPUT" | jq -c '.documentation_updates_needed // []')
+          if [ "$DOC_UPDATES" != "[]" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Documentation Updates Suggested
+          $(echo "$OUTPUT" | jq -r '.documentation_updates_needed[]? | "- **\(.file)**: \(.reason)"' 2>/dev/null)
+          "
+          fi
+
+          COMMENT_BODY="${COMMENT_BODY}
+
+          ---
+          *Automated Project Memory Review by Claude Code*"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+
+      - name: Set commit status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary' | head -c 140)
+
+          if [ "$PASSED" = "true" ]; then
+            STATE="success"
+            DESCRIPTION="Project memory review passed"
+          else
+            STATE="failure"
+            DESCRIPTION="Project memory violations found"
+          fi
+
+          gh api repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -f state="$STATE" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="$DESCRIPTION" \
+            -f context="Project Memory Review"
+
+      - name: Fail if review failed
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+
+          if [ "$PASSED" != "true" ]; then
+            echo "::error::Project memory review failed. See PR comment for details."
+            exit 1
+          fi

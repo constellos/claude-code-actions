@@ -1,0 +1,223 @@
+name: Skills Review
+
+# Reviews .claude/skills/**/SKILL.md files for context optimization
+# Ensures skills are well-structured with proper documentation
+# Advises on skill improvements - DOES NOT edit files
+
+on:
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - '.claude/skills/**'
+      - 'skills/**'
+      - '**/SKILL.md'
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: skills-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  skills-review:
+    runs-on: ubuntu-latest
+    outputs:
+      review_passed: ${{ steps.review.outputs.passed }}
+      structured_output: ${{ steps.review.outputs.structured_output }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract context
+        id: context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="${{ github.head_ref || github.ref_name }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          # Extract issue number
+          ISSUE_NUMBER=""
+          if [[ $BRANCH_NAME =~ ^(feature|fix|bugfix|hotfix)/([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+          elif [[ $BRANCH_NAME =~ ^([0-9]+)- ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+          fi
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+          # Get changed skill files
+          CHANGED_SKILLS=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' | grep -E '(skills/.*\.md|SKILL\.md)' || echo "")
+          echo "$CHANGED_SKILLS" > /tmp/changed_skills.txt
+          echo "changed_skills=$CHANGED_SKILLS" >> $GITHUB_OUTPUT
+
+      - name: Get issue context
+        if: steps.context.outputs.issue_number != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue view ${{ steps.context.outputs.issue_number }} --json title,body,comments > /tmp/issue.json 2>/dev/null || echo "{}" > /tmp/issue.json
+
+      - name: Skills Review with Claude
+        id: review
+        uses: anthropics/claude-code-base-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*)"
+          max_turns: 15
+          prompt: |
+            # Skills Review Agent
+
+            You are a skills review specialist focused on context optimization. Your job is to review .claude/skills/**/SKILL.md files for quality, structure, and context efficiency.
+
+            ## Context
+            - Branch: ${{ steps.context.outputs.branch_name }}
+            - Issue: ${{ steps.context.outputs.issue_number }}
+            - Changed Skills: Read /tmp/changed_skills.txt
+
+            ## Skill Quality Criteria
+
+            1. **Frontmatter Requirements**:
+               - `description`: Clear, concise skill purpose (triggers skill invocation)
+               - `capabilities`: Array of specific things the skill enables
+               - Optional: `required_skills`, `related_skills`
+
+            2. **Content Structure**:
+               - Clear title heading
+               - Overview section explaining the skill
+               - Detailed guidance organized with sub-headings
+               - Examples with code blocks where appropriate
+               - Links to official documentation (prefer .md URLs)
+
+            3. **Context Optimization**:
+               - Is the skill focused on ONE topic?
+               - Does it avoid duplicating general knowledge?
+               - Is content dense with actionable guidance?
+               - Are examples minimal but representative?
+               - Could any sections be split to separate skills?
+
+            4. **Progressive Disclosure**:
+               - Is the most important info at the top?
+               - Are details progressively revealed?
+               - Can Claude find key info quickly?
+
+            5. **Documentation Links**:
+               - Are there links to official docs?
+               - Are .md file URLs preferred over HTML?
+               - Are links current and accessible?
+
+            ## Your Task
+
+            1. Read each changed skill file
+            2. Evaluate against the criteria above
+            3. Check if issue context suggests needed updates
+            4. Identify context optimization opportunities
+            5. Provide specific, actionable suggestions
+
+            ## IMPORTANT RULES
+
+            - **DO NOT edit any files** - you are a reviewer only
+            - Focus on context efficiency (every token should add value)
+            - Skills should be self-contained but not redundant
+            - Flag skills that are too broad or try to cover too much
+
+            ## Output Format
+
+            Provide skill-by-skill analysis, then overall assessment.
+
+          claude_args: |
+            --json-schema '{"type":"object","properties":{"passed":{"type":"boolean"},"confidence":{"type":"number","minimum":0,"maximum":1},"skill_evaluations":{"type":"array","items":{"type":"object","properties":{"skill_file":{"type":"string"},"frontmatter_valid":{"type":"boolean"},"context_efficiency":{"type":"number","minimum":1,"maximum":10,"description":"1=bloated, 10=optimally dense"},"structure_score":{"type":"number","minimum":1,"maximum":10},"documentation_links":{"type":"boolean","description":"Has links to official docs"},"progressive_disclosure":{"type":"boolean"},"issues":{"type":"array","items":{"type":"string"}},"suggestions":{"type":"array","items":{"type":"string"}}}}},"optimization_opportunities":{"type":"array","items":{"type":"string"}},"split_recommendations":{"type":"array","items":{"type":"object","properties":{"skill_file":{"type":"string"},"reason":{"type":"string"},"suggested_split":{"type":"array","items":{"type":"string"}}}}},"summary":{"type":"string"}},"required":["passed","confidence","summary"]}'
+
+      - name: Post review comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          CONFIDENCE=$(echo "$OUTPUT" | jq -r '.confidence')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary')
+
+          if [ "$PASSED" = "true" ]; then
+            STATUS_ICON=":white_check_mark:"
+            STATUS_TEXT="PASSED"
+          else
+            STATUS_ICON=":warning:"
+            STATUS_TEXT="NEEDS IMPROVEMENT"
+          fi
+
+          COMMENT_BODY="## Skills Review ${STATUS_ICON} ${STATUS_TEXT}
+
+          **Confidence:** ${CONFIDENCE}
+
+          ### Summary
+          ${SUMMARY}
+          "
+
+          # Add skill evaluations
+          echo "$OUTPUT" | jq -r '.skill_evaluations[]? | "### \(.skill_file)\n- **Context Efficiency:** \(.context_efficiency)/10\n- **Structure Score:** \(.structure_score)/10\n- **Has Doc Links:** \(.documentation_links)\n- **Progressive Disclosure:** \(.progressive_disclosure)\n\n**Issues:**\n\(.issues | if length > 0 then map(\"- \" + .) | join(\"\n\") else \"None\" end)\n\n**Suggestions:**\n\(.suggestions | if length > 0 then map(\"- \" + .) | join(\"\n\") else \"None\" end)\n"' 2>/dev/null | while IFS= read -r line; do
+            COMMENT_BODY="${COMMENT_BODY}${line}
+          "
+          done
+
+          # Add optimization opportunities
+          OPTS=$(echo "$OUTPUT" | jq -r '.optimization_opportunities // [] | .[]' 2>/dev/null)
+          if [ -n "$OPTS" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Context Optimization Opportunities
+          $(echo "$OPTS" | while read -r opt; do echo "- :zap: $opt"; done)
+          "
+          fi
+
+          # Add split recommendations
+          SPLITS=$(echo "$OUTPUT" | jq -c '.split_recommendations // []')
+          if [ "$SPLITS" != "[]" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Skill Split Recommendations
+          $(echo "$OUTPUT" | jq -r '.split_recommendations[]? | "- **\(.skill_file)**: \(.reason)\n  - Suggested: \(.suggested_split | join(\", \"))"' 2>/dev/null)
+          "
+          fi
+
+          COMMENT_BODY="${COMMENT_BODY}
+
+          ---
+          *Automated Skills Review by Claude Code*"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+
+      - name: Set commit status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary' | head -c 140)
+
+          if [ "$PASSED" = "true" ]; then
+            STATE="success"
+            DESCRIPTION="Skills review passed"
+          else
+            STATE="failure"
+            DESCRIPTION="Skills need improvement"
+          fi
+
+          gh api repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -f state="$STATE" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="$DESCRIPTION" \
+            -f context="Skills Review"
+
+      - name: Fail if review failed
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+
+          if [ "$PASSED" != "true" ]; then
+            echo "::warning::Skills review identified improvements needed. See PR comment."
+            exit 1
+          fi

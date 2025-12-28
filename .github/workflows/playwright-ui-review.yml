@@ -1,0 +1,382 @@
+name: Playwright UI Review
+
+# Runs all Playwright tests and sends screenshots to Claude for UI review
+# Fails if tests don't pass, then checks UI against rules and best practices
+# Advises on UI quality - DOES NOT edit files
+
+on:
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - 'apps/**'
+      - 'packages/ui/**'
+      - '**/*.tsx'
+      - '**/*.css'
+      - '**/tailwind.config.*'
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: playwright-ui-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  playwright-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      tests_passed: ${{ steps.playwright.outcome == 'success' }}
+      screenshot_count: ${{ steps.screenshots.outputs.count }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run Playwright tests
+        id: playwright
+        continue-on-error: true
+        run: |
+          # Create screenshots directory
+          mkdir -p .playwright-screenshots
+
+          # Run tests with screenshot capture
+          npx playwright test \
+            --project=chromium \
+            --reporter=list,html \
+            --screenshot=on \
+            --output=.playwright-screenshots \
+            2>&1 | tee playwright-output.txt
+
+          # Store exit code
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Collect screenshots
+        id: screenshots
+        run: |
+          # Create consolidated screenshots directory
+          mkdir -p .claude/screenshots
+
+          # Copy screenshots from test results
+          find .playwright-screenshots -name "*.png" -type f | while read -r file; do
+            # Create unique name from path
+            UNIQUE_NAME=$(echo "$file" | sed 's/[\/\.]/_/g' | sed 's/^_//')
+            cp "$file" ".claude/screenshots/${UNIQUE_NAME}.png"
+          done
+
+          # Also check for test-results directory (Playwright default)
+          if [ -d "test-results" ]; then
+            find test-results -name "*.png" -type f | while read -r file; do
+              UNIQUE_NAME=$(echo "$file" | sed 's/[\/\.]/_/g' | sed 's/^_//')
+              cp "$file" ".claude/screenshots/${UNIQUE_NAME}.png" 2>/dev/null || true
+            done
+          fi
+
+          # Count screenshots
+          COUNT=$(ls -1 .claude/screenshots/*.png 2>/dev/null | wc -l)
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+          # List screenshots for Claude
+          ls -la .claude/screenshots/ > .claude/screenshot-manifest.txt 2>/dev/null || echo "No screenshots" > .claude/screenshot-manifest.txt
+
+      - name: Upload screenshots artifact
+        if: steps.screenshots.outputs.count > 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots-${{ github.sha }}
+          path: .claude/screenshots/
+          retention-days: 7
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Check test results
+        run: |
+          if [ "${{ steps.playwright.outcome }}" != "success" ]; then
+            echo "::error::Playwright tests failed. UI review will still proceed with available screenshots."
+          fi
+
+  ui-review:
+    needs: playwright-tests
+    runs-on: ubuntu-latest
+    outputs:
+      review_passed: ${{ steps.review.outputs.passed }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download screenshots
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-screenshots-${{ github.sha }}
+          path: .claude/screenshots/
+        continue-on-error: true
+
+      - name: Extract context
+        id: context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="${{ github.head_ref || github.ref_name }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          # Get changed UI files
+          CHANGED_FILES=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' | grep -E '\.(tsx|css|scss)$' || echo "")
+          echo "$CHANGED_FILES" > /tmp/changed_ui_files.txt
+
+          # Check for screenshots
+          SCREENSHOT_COUNT=$(ls -1 .claude/screenshots/*.png 2>/dev/null | wc -l)
+          echo "screenshot_count=$SCREENSHOT_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Gather UI rules
+        id: rules
+        run: |
+          # Find UI-related rules
+          mkdir -p /tmp/ui-rules
+
+          # Look for ui-prefixed skills
+          find .claude/skills -name "ui-*" -type d 2>/dev/null | while read -r dir; do
+            if [ -f "$dir/SKILL.md" ]; then
+              cp "$dir/SKILL.md" "/tmp/ui-rules/$(basename $dir).md"
+            fi
+          done
+
+          # Look for UI rules in .claude/rules
+          find .claude/rules -name "ui-*" -o -name "*-ui-*" 2>/dev/null | while read -r file; do
+            cp "$file" "/tmp/ui-rules/" 2>/dev/null || true
+          done
+
+          # Count rules found
+          RULES_COUNT=$(ls -1 /tmp/ui-rules/*.md 2>/dev/null | wc -l)
+          echo "rules_count=$RULES_COUNT" >> $GITHUB_OUTPUT
+
+      - name: UI Review with Claude
+        id: review
+        uses: anthropics/claude-code-base-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*),Bash(ls:*)"
+          max_turns: 25
+          model: claude-sonnet-4-5-20250929
+          prompt: |
+            # Playwright UI Review Agent
+
+            You are a UI review specialist. Your job is to review UI screenshots from Playwright tests and evaluate them against UI rules and modern best practices.
+
+            ## Context
+            - Branch: ${{ steps.context.outputs.branch_name }}
+            - Screenshot Count: ${{ steps.context.outputs.screenshot_count }}
+            - UI Rules Count: ${{ steps.rules.outputs.rules_count }}
+            - Tests Passed: ${{ needs.playwright-tests.outputs.tests_passed }}
+
+            ## Your Task
+
+            1. **Check test status**:
+               - If tests failed, note this as a blocking issue
+
+            2. **Review screenshots** (in .claude/screenshots/):
+               - Read the screenshot manifest: .claude/screenshot-manifest.txt
+               - View each screenshot file
+               - Note the file path for context on what UI element it shows
+
+            3. **Check against UI rules** (in /tmp/ui-rules/):
+               - Read each UI rule/skill file
+               - Evaluate screenshots against documented standards
+
+            4. **Evaluate against modern UI best practices**:
+
+               **Visual Design:**
+               - Clear visual hierarchy
+               - Consistent spacing (8px grid)
+               - Accessible color contrast (WCAG 2.1 AA: 4.5:1 minimum)
+               - Readable typography
+               - Dark/light mode support if applicable
+
+               **Layout & Responsiveness:**
+               - Mobile-first approach
+               - Proper responsive breakpoints
+               - No layout shifts or overflow issues
+
+               **Accessibility:**
+               - Visible focus indicators
+               - Proper touch targets (44x44px minimum)
+               - Semantic structure visible in UI
+
+               **User Experience:**
+               - Clear call-to-action buttons
+               - Logical flow and navigation
+               - Loading and error states handled
+               - Empty states designed
+
+               **Modern Elegance:**
+               - Clean, uncluttered design
+               - Consistent component styling
+               - Appropriate use of whitespace
+               - Professional and polished appearance
+
+            5. **Categorize issues**:
+               - **Critical**: Broken layout, missing content, accessibility violations
+               - **Major**: Poor UX, inconsistent styling, confusing navigation
+               - **Minor**: Small visual tweaks, optimization opportunities
+
+            6. **Make your decision**:
+               - PASS: No critical issues, acceptable visual quality
+               - FAIL: Critical issues found or tests failed
+
+            ## IMPORTANT RULES
+
+            - **DO NOT edit any files** - you are a reviewer only
+            - If no screenshots available, note this and skip visual review
+            - Tests failing is always a blocking issue
+            - Be specific about which screenshot shows each issue
+            - Suggest concrete improvements
+
+            ## Output Format
+
+            Provide screenshot-by-screenshot analysis, then overall assessment.
+
+          claude_args: |
+            --json-schema '{"type":"object","properties":{"passed":{"type":"boolean"},"confidence":{"type":"number","minimum":0,"maximum":1},"tests_passed":{"type":"boolean"},"screenshot_reviews":{"type":"array","items":{"type":"object","properties":{"screenshot_path":{"type":"string"},"description":{"type":"string"},"critical_issues":{"type":"array","items":{"type":"string"}},"major_issues":{"type":"array","items":{"type":"string"}},"minor_issues":{"type":"array","items":{"type":"string"}},"positive_aspects":{"type":"array","items":{"type":"string"}}}}},"rule_compliance":{"type":"array","items":{"type":"object","properties":{"rule":{"type":"string"},"compliant":{"type":"boolean"},"violations":{"type":"array","items":{"type":"string"}}}}},"best_practices_evaluation":{"type":"object","properties":{"visual_design":{"type":"number","minimum":1,"maximum":10},"layout_responsiveness":{"type":"number","minimum":1,"maximum":10},"accessibility":{"type":"number","minimum":1,"maximum":10},"user_experience":{"type":"number","minimum":1,"maximum":10},"modern_elegance":{"type":"number","minimum":1,"maximum":10}}},"total_critical":{"type":"number"},"total_major":{"type":"number"},"total_minor":{"type":"number"},"top_recommendations":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"}},"required":["passed","confidence","summary"]}'
+
+      - name: Post review comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          CONFIDENCE=$(echo "$OUTPUT" | jq -r '.confidence')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary')
+          TESTS_PASSED=$(echo "$OUTPUT" | jq -r '.tests_passed')
+
+          CRITICAL=$(echo "$OUTPUT" | jq -r '.total_critical // 0')
+          MAJOR=$(echo "$OUTPUT" | jq -r '.total_major // 0')
+          MINOR=$(echo "$OUTPUT" | jq -r '.total_minor // 0')
+
+          if [ "$PASSED" = "true" ]; then
+            STATUS_ICON=":white_check_mark:"
+            STATUS_TEXT="PASSED"
+          else
+            STATUS_ICON=":x:"
+            STATUS_TEXT="FAILED"
+          fi
+
+          COMMENT_BODY="## Playwright UI Review ${STATUS_ICON} ${STATUS_TEXT}
+
+          **Confidence:** ${CONFIDENCE}
+          **Tests Passed:** $TESTS_PASSED
+
+          ### Issue Summary
+          | Level | Count |
+          |-------|-------|
+          | :rotating_light: Critical | ${CRITICAL} |
+          | :warning: Major | ${MAJOR} |
+          | :information_source: Minor | ${MINOR} |
+
+          ### Summary
+          ${SUMMARY}
+          "
+
+          # Add best practices scores
+          BP=$(echo "$OUTPUT" | jq '.best_practices_evaluation // {}')
+          if [ "$BP" != "{}" ]; then
+            VISUAL=$(echo "$BP" | jq -r '.visual_design // "N/A"')
+            LAYOUT=$(echo "$BP" | jq -r '.layout_responsiveness // "N/A"')
+            A11Y=$(echo "$BP" | jq -r '.accessibility // "N/A"')
+            UX=$(echo "$BP" | jq -r '.user_experience // "N/A"')
+            ELEGANCE=$(echo "$BP" | jq -r '.modern_elegance // "N/A"')
+
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Best Practices Scores
+          | Category | Score |
+          |----------|-------|
+          | Visual Design | ${VISUAL}/10 |
+          | Layout & Responsiveness | ${LAYOUT}/10 |
+          | Accessibility | ${A11Y}/10 |
+          | User Experience | ${UX}/10 |
+          | Modern Elegance | ${ELEGANCE}/10 |
+          "
+          fi
+
+          # Add top recommendations
+          RECS=$(echo "$OUTPUT" | jq -r '.top_recommendations // [] | .[]' 2>/dev/null)
+          if [ -n "$RECS" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Top Recommendations
+          $(echo "$RECS" | while read -r rec; do echo "1. $rec"; done)
+          "
+          fi
+
+          # Add critical issues if any
+          if [ "$CRITICAL" -gt 0 ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### :rotating_light: Critical Issues
+          $(echo "$OUTPUT" | jq -r '.screenshot_reviews[]? | select(.critical_issues | length > 0) | "**\(.screenshot_path)**:\n\(.critical_issues | map(\"- \" + .) | join(\"\n\"))"' 2>/dev/null)
+          "
+          fi
+
+          COMMENT_BODY="${COMMENT_BODY}
+
+          ---
+          *Automated Playwright UI Review by Claude Code*
+
+          [View Screenshots Artifact](/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+
+      - name: Set commit status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          CRITICAL=$(echo "$OUTPUT" | jq -r '.total_critical // 0')
+
+          if [ "$PASSED" = "true" ]; then
+            STATE="success"
+            DESCRIPTION="UI review passed"
+          else
+            STATE="failure"
+            DESCRIPTION="UI review failed: ${CRITICAL} critical issues"
+          fi
+
+          gh api repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -f state="$STATE" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="$DESCRIPTION" \
+            -f context="Playwright UI Review"
+
+      - name: Fail if review failed
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          TESTS_PASSED="${{ needs.playwright-tests.outputs.tests_passed }}"
+
+          if [ "$TESTS_PASSED" != "true" ]; then
+            echo "::error::Playwright tests failed. Fix tests before UI can be approved."
+            exit 1
+          fi
+
+          if [ "$PASSED" != "true" ]; then
+            echo "::error::UI review failed. See PR comment for details."
+            exit 1
+          fi

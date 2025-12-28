@@ -1,0 +1,264 @@
+name: Rules Review
+
+# Reviews code changes against .claude/rules/*.md files
+# Groups changed files by path patterns to matching rules
+# Advises on rule compliance and needed rule updates - DOES NOT edit files
+# Runs after requirements-review succeeds
+
+on:
+  workflow_run:
+    workflows: ["Requirements Review"]
+    types:
+      - completed
+  pull_request:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: rules-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rules-review:
+    runs-on: ubuntu-latest
+    # Only run if requirements review passed (or if triggered directly on PR)
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    outputs:
+      review_passed: ${{ steps.review.outputs.passed }}
+      structured_output: ${{ steps.review.outputs.structured_output }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get trigger context
+        id: trigger
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
+          else
+            echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.head_ref || github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract branch context
+        id: context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="${{ steps.trigger.outputs.ref }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          # Extract issue number from branch
+          ISSUE_NUMBER=""
+          if [[ $BRANCH_NAME =~ ^(feature|fix|bugfix|hotfix)/([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+          elif [[ $BRANCH_NAME =~ ^([0-9]+)- ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+          elif [[ $BRANCH_NAME =~ issue-([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+          fi
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+          # Get changed files
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | tr '\n' ' ' || echo "")
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+
+          # Save changed files to file for Claude
+          git diff --name-only HEAD~1 HEAD 2>/dev/null > /tmp/changed_files.txt || echo "" > /tmp/changed_files.txt
+
+      - name: Get issue context
+        id: issue
+        if: steps.context.outputs.issue_number != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUM="${{ steps.context.outputs.issue_number }}"
+
+          # Get issue details
+          gh issue view $ISSUE_NUM --json title,body,comments > /tmp/issue.json 2>/dev/null || echo "{}" > /tmp/issue.json
+
+          echo "has_issue=true" >> $GITHUB_OUTPUT
+
+      - name: Discover rules
+        id: rules
+        run: |
+          # Find all rules files
+          find .claude/rules -name "*.md" -type f 2>/dev/null > /tmp/rules_files.txt || echo "" > /tmp/rules_files.txt
+
+          RULES_COUNT=$(wc -l < /tmp/rules_files.txt | tr -d ' ')
+          echo "rules_count=$RULES_COUNT" >> $GITHUB_OUTPUT
+
+          # Also check for project CLAUDE.md rules
+          if [ -f "CLAUDE.md" ]; then
+            echo "CLAUDE.md" >> /tmp/rules_files.txt
+          fi
+
+      - name: Rules Review with Claude
+        id: review
+        uses: anthropics/claude-code-base-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: "View,GlobTool,Grep,Bash(git diff:*),Bash(git log:*),Bash(cat:*),Bash(find:*)"
+          max_turns: 20
+          prompt: |
+            # Rules Review Agent
+
+            You are a rules compliance review agent. Your job is to verify that code changes comply with the project's rules defined in .claude/rules/*.md files.
+
+            ## Context
+            - Branch: ${{ steps.context.outputs.branch_name }}
+            - Issue Number: ${{ steps.context.outputs.issue_number }}
+            - Changed Files: ${{ steps.context.outputs.changed_files }}
+            - Rules Count: ${{ steps.rules.outputs.rules_count }}
+
+            ## Your Task
+
+            1. **Read the changed files list**:
+               - Read /tmp/changed_files.txt
+
+            2. **Discover and read all rules**:
+               - Read /tmp/rules_files.txt for list of rule files
+               - Read each rule file in .claude/rules/
+               - Each rule has frontmatter with path patterns (globs) that define which files it applies to
+
+            3. **Group changed files by matching rules**:
+               - For each changed file, find which rules apply based on path patterns in frontmatter
+               - A file may match multiple rules
+               - Track files that don't match any rule
+
+            4. **For each rule-file group, evaluate compliance**:
+               - Read the rule's requirements
+               - Check if the changed files comply with those requirements
+               - Identify any violations
+
+            5. **Check for needed rule updates**:
+               - Read /tmp/issue.json for linked issue context
+               - Based on issue requirements and comments, identify if any rules need updating
+               - This is a BLOCKING ERROR if rule updates seem clearly needed
+
+            6. **Make your decision**:
+               - PASS: All files comply with their matching rules
+               - FAIL: Rule violations found, or rule updates needed
+
+            ## IMPORTANT RULES
+
+            - **DO NOT edit any files** - you are a reviewer only
+            - **Advise on rule fixes** - suggest what should be changed to comply
+            - **Advise on rule updates** - if rules seem outdated based on issue/comments
+            - **Blocking errors**: Rule updates needed = automatic FAIL
+
+            ## Output Format
+
+            Provide detailed rule-by-rule analysis, then your final decision.
+
+          claude_args: |
+            --json-schema '{"type":"object","properties":{"passed":{"type":"boolean","description":"Whether the review passed"},"confidence":{"type":"number","minimum":0,"maximum":1},"rule_evaluations":{"type":"array","items":{"type":"object","properties":{"rule_file":{"type":"string"},"matched_files":{"type":"array","items":{"type":"string"}},"compliant":{"type":"boolean"},"violations":{"type":"array","items":{"type":"string"}},"suggestions":{"type":"array","items":{"type":"string"}}}}},"files_without_rules":{"type":"array","items":{"type":"string"}},"rule_updates_needed":{"type":"array","items":{"type":"object","properties":{"rule_file":{"type":"string"},"reason":{"type":"string"},"suggested_update":{"type":"string"}}}},"summary":{"type":"string"},"blocking_errors":{"type":"array","items":{"type":"string"}}},"required":["passed","confidence","summary"]}'
+
+      - name: Post review comment
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          CONFIDENCE=$(echo "$OUTPUT" | jq -r '.confidence')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary')
+
+          if [ "$PASSED" = "true" ]; then
+            STATUS_ICON=":white_check_mark:"
+            STATUS_TEXT="PASSED"
+          else
+            STATUS_ICON=":x:"
+            STATUS_TEXT="FAILED"
+          fi
+
+          COMMENT_BODY="## Rules Review ${STATUS_ICON} ${STATUS_TEXT}
+
+          **Confidence:** ${CONFIDENCE}
+
+          ### Summary
+          ${SUMMARY}
+          "
+
+          # Add rule evaluations
+          RULE_EVALS=$(echo "$OUTPUT" | jq -c '.rule_evaluations // []')
+          if [ "$RULE_EVALS" != "[]" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Rule Evaluations
+          "
+            echo "$OUTPUT" | jq -r '.rule_evaluations[]? | "#### \(.rule_file)\n- **Files:** \(.matched_files | join(\", \"))\n- **Compliant:** \(.compliant)\n\(.violations | if length > 0 then \"- **Violations:**\n\" + (map(\"  - \" + .) | join(\"\n\")) else \"\" end)\n"' 2>/dev/null | while IFS= read -r line; do
+              COMMENT_BODY="${COMMENT_BODY}${line}
+          "
+            done
+          fi
+
+          # Add blocking errors
+          BLOCKING=$(echo "$OUTPUT" | jq -r '.blocking_errors // [] | .[]' 2>/dev/null)
+          if [ -n "$BLOCKING" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### :rotating_light: Blocking Errors
+          $(echo "$BLOCKING" | while read -r err; do echo "- $err"; done)
+          "
+          fi
+
+          # Add rule updates needed
+          UPDATES=$(echo "$OUTPUT" | jq -c '.rule_updates_needed // []')
+          if [ "$UPDATES" != "[]" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### Rule Updates Needed
+          $(echo "$OUTPUT" | jq -r '.rule_updates_needed[]? | "- **\(.rule_file)**: \(.reason)"' 2>/dev/null)
+          "
+          fi
+
+          COMMENT_BODY="${COMMENT_BODY}
+
+          ---
+          *Automated Rules Review by Claude Code*"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+
+      - name: Set commit status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+          SUMMARY=$(echo "$OUTPUT" | jq -r '.summary' | head -c 140)
+          SHA="${{ steps.trigger.outputs.sha || github.sha }}"
+
+          if [ "$PASSED" = "true" ]; then
+            STATE="success"
+            DESCRIPTION="Rules review passed"
+          else
+            STATE="failure"
+            DESCRIPTION="Rules review failed: $SUMMARY"
+          fi
+
+          gh api repos/${{ github.repository }}/statuses/$SHA \
+            -f state="$STATE" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="$DESCRIPTION" \
+            -f context="Rules Review"
+
+      - name: Fail if review failed
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+          PASSED=$(echo "$OUTPUT" | jq -r '.passed')
+
+          if [ "$PASSED" != "true" ]; then
+            echo "::error::Rules review failed. See PR comment for details."
+            exit 1
+          fi
