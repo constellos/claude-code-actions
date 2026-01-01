@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "constellos": {
+      "source": {
+        "source": "github",
+        "repo": "constellos/claude-code-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "project-context@constellos": true,
+    "github-context@constellos": true
+  }
+}
