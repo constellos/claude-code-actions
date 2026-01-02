@@ -16,7 +16,8 @@ permissions:
   statuses: write
 
 concurrency:
-  group: ci-pipeline-${{ github.ref }}
+  # Use head_ref for PRs, ref_name for pushes - ensures same branch cancels previous runs
+  group: ci-pipeline-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -298,12 +299,14 @@ jobs:
 
   # =============================================================================
   # STAGE 4: Code Reviews (runs after prerequisites pass)
+  # Only runs on pull_request events to avoid duplicates
   # =============================================================================
   reviews:
     name: Code Reviews
     needs: [config, basic-ci-complete, e2e-tests]
     if: |
       always() &&
+      github.event_name == 'pull_request' &&
       needs.config.outputs.reviews_enabled == 'true' &&
       needs.basic-ci-complete.result == 'success' &&
       needs.basic-ci-complete.outputs.success == 'true' &&
