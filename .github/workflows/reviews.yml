@@ -618,6 +618,11 @@ jobs:
       structured_output: ${{ steps.review.outputs.structured_output }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Check if path filter applies
         id: filter
         uses: dorny/paths-filter@v3
@@ -627,12 +632,6 @@ jobs:
               - 'CLAUDE.md'
               - '**/CLAUDE.md'
               - '.claude/**'
-
-      - name: Checkout code
-        if: steps.filter.outputs.memory == 'true'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Extract context
         if: steps.filter.outputs.memory == 'true'
@@ -923,6 +922,11 @@ jobs:
       structured_output: ${{ steps.review.outputs.structured_output }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Check if path filter applies
         id: filter
         uses: dorny/paths-filter@v3
@@ -932,12 +936,6 @@ jobs:
               - '.claude/agents/**'
               - 'agents/**'
               - '**/agents/*.md'
-
-      - name: Checkout code
-        if: steps.filter.outputs.agents == 'true'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Extract context
         if: steps.filter.outputs.agents == 'true'
@@ -1177,6 +1175,11 @@ jobs:
       structured_output: ${{ steps.review.outputs.structured_output }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Check if path filter applies
         id: filter
         uses: dorny/paths-filter@v3
@@ -1186,12 +1189,6 @@ jobs:
               - '.claude/skills/**'
               - 'skills/**'
               - '**/SKILL.md'
-
-      - name: Checkout code
-        if: steps.filter.outputs.skills == 'true'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Extract context
         if: steps.filter.outputs.skills == 'true'
@@ -1452,6 +1449,9 @@ jobs:
       review_passed: ${{ steps.review.outputs.passed }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Check if path filter applies
         id: filter
         uses: dorny/paths-filter@v3
@@ -1463,10 +1463,6 @@ jobs:
               - '**/*.tsx'
               - '**/*.css'
               - '**/tailwind.config.*'
-
-      - name: Checkout code
-        if: steps.filter.outputs.ui == 'true'
-        uses: actions/checkout@v4
 
       - name: Download screenshots
         if: steps.filter.outputs.ui == 'true'
