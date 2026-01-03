@@ -1,892 +1,620 @@
-name: CI Pipeline
-
-# Unified CI pipeline that orchestrates the entire CI flow
-# Replaces fragmented workflows with a single dependency chain
+name: CI
 
 on:
-  push:
-    branches: ['**']
   pull_request:
     branches: ['**']
 
 permissions:
   contents: read
   pull-requests: write
-  issues: write
-  statuses: write
+  issues: read
 
 concurrency:
-  # Use head_ref for PRs, ref_name for pushes - ensures same branch cancels previous runs
-  group: ci-pipeline-${{ github.head_ref || github.ref_name }}
+  group: ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+env:
+  NODE_VERSION: '22'
+
 jobs:
-  # =============================================================================
-  # STAGE 1: Configuration
-  # =============================================================================
-  config:
-    name: Read CI Config
+  # ============================================
+  # STATIC ANALYSIS
+  # ============================================
+  lint:
+    name: "Static Analysis / Lint (ESLint)"
     runs-on: ubuntu-latest
     outputs:
-      basic_enabled: ${{ steps.config.outputs.basic_enabled }}
-      lint_enabled: ${{ steps.config.outputs.lint_enabled }}
-      typecheck_enabled: ${{ steps.config.outputs.typecheck_enabled }}
-      vitest_enabled: ${{ steps.config.outputs.vitest_enabled }}
-      e2e_enabled: ${{ steps.config.outputs.e2e_enabled }}
-      reviews_enabled: ${{ steps.config.outputs.reviews_enabled }}
-      requirements_review: ${{ steps.config.outputs.requirements_review }}
-      rules_review: ${{ steps.config.outputs.rules_review }}
-      project_memory_review: ${{ steps.config.outputs.project_memory_review }}
-      agents_review: ${{ steps.config.outputs.agents_review }}
-      skills_review: ${{ steps.config.outputs.skills_review }}
-      playwright_ui_review: ${{ steps.config.outputs.playwright_ui_review }}
-      deployment_enabled: ${{ steps.config.outputs.deployment_enabled }}
-
+      has_app: ${{ steps.detect.outputs.has_app }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install yq
+      - name: Detect environment
+        id: detect
         run: |
-          sudo wget -q https://github.com/mikefarah/yq/releases/download/v4.35.1/yq_linux_amd64 -O /usr/local/bin/yq
-          sudo chmod +x /usr/local/bin/yq
+          # Detect package manager
+          PM="npm"
+          [ -f "bun.lockb" ] || [ -f "bun.lock" ] && PM="bun"
+          [ -f "pnpm-lock.yaml" ] && PM="pnpm"
+          [ -f "yarn.lock" ] && PM="yarn"
+          echo "pm=$PM" >> $GITHUB_OUTPUT
 
-      - name: Read CI config
-        id: config
+          # Detect app
+          HAS_APP=false
+          [ -f "next.config.js" ] && HAS_APP=true
+          [ -f "next.config.mjs" ] && HAS_APP=true
+          [ -f "next.config.ts" ] && HAS_APP=true
+          [ -f "vite.config.ts" ] && HAS_APP=true
+          [ -f "vite.config.js" ] && HAS_APP=true
+          [ -f "playwright.config.ts" ] && HAS_APP=true
+          ls apps/*/package.json >/dev/null 2>&1 && HAS_APP=true
+          [ -d "src/app" ] && HAS_APP=true
+          echo "has_app=$HAS_APP" >> $GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.pm != 'bun'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.detect.outputs.pm == 'bun'
+
+      - name: Install dependencies
         run: |
-          CONFIG_FILE=".github/ci-config.yml"
+          case "${{ steps.detect.outputs.pm }}" in
+            bun) bun install --frozen-lockfile ;;
+            pnpm) corepack enable && pnpm install --frozen-lockfile ;;
+            yarn) yarn --frozen-lockfile ;;
+            *) npm ci ;;
+          esac
 
-          if [ -f "$CONFIG_FILE" ]; then
-            # Basic CI
-            echo "basic_enabled=$(yq '.ci.basic.enabled // true' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "lint_enabled=$(yq '.ci.basic.lint // true' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "typecheck_enabled=$(yq '.ci.basic.typecheck // true' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "vitest_enabled=$(yq '.ci.basic.vitest // true' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+      - name: Lint
+        run: |
+          PM="${{ steps.detect.outputs.pm }}"
+          $PM run lint
 
-            # E2E
-            echo "e2e_enabled=$(yq '.ci.e2e.enabled // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+  types:
+    name: "Static Analysis / Types (TypeScript)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-            # Reviews
-            echo "reviews_enabled=$(yq '.ci.reviews.enabled // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "requirements_review=$(yq '.ci.reviews.requirements // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "rules_review=$(yq '.ci.reviews.rules // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "project_memory_review=$(yq '.ci.reviews.project_memory // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "agents_review=$(yq '.ci.reviews.agents // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "skills_review=$(yq '.ci.reviews.skills // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-            echo "playwright_ui_review=$(yq '.ci.reviews.playwright_ui // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+      - name: Detect package manager
+        id: detect
+        run: |
+          PM="npm"
+          [ -f "bun.lockb" ] || [ -f "bun.lock" ] && PM="bun"
+          [ -f "pnpm-lock.yaml" ] && PM="pnpm"
+          [ -f "yarn.lock" ] && PM="yarn"
+          echo "pm=$PM" >> $GITHUB_OUTPUT
 
-            # Deployment
-            echo "deployment_enabled=$(yq '.ci.deployment.enabled // false' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.pm != 'bun'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.detect.outputs.pm == 'bun'
+
+      - name: Install dependencies
+        run: |
+          case "${{ steps.detect.outputs.pm }}" in
+            bun) bun install --frozen-lockfile ;;
+            pnpm) corepack enable && pnpm install --frozen-lockfile ;;
+            yarn) yarn --frozen-lockfile ;;
+            *) npm ci ;;
+          esac
+
+      - name: Typecheck
+        run: |
+          PM="${{ steps.detect.outputs.pm }}"
+          $PM run typecheck || npx tsc --noEmit
+
+  # ============================================
+  # TESTS (requires Static Analysis)
+  # ============================================
+  unit:
+    name: "Tests / Unit (Vitest)"
+    needs: [lint, types]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect package manager
+        id: detect
+        run: |
+          PM="npm"
+          [ -f "bun.lockb" ] || [ -f "bun.lock" ] && PM="bun"
+          [ -f "pnpm-lock.yaml" ] && PM="pnpm"
+          [ -f "yarn.lock" ] && PM="yarn"
+          echo "pm=$PM" >> $GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.pm != 'bun'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.detect.outputs.pm == 'bun'
+
+      - name: Install dependencies
+        run: |
+          case "${{ steps.detect.outputs.pm }}" in
+            bun) bun install --frozen-lockfile ;;
+            pnpm) corepack enable && pnpm install --frozen-lockfile ;;
+            yarn) yarn --frozen-lockfile ;;
+            *) npm ci ;;
+          esac
+
+      - name: Run unit tests
+        run: |
+          PM="${{ steps.detect.outputs.pm }}"
+          if [ -f "vitest.config.ts" ] || [ -f "vitest.config.js" ]; then
+            $PM run test -- --passWithNoTests || npx vitest run --passWithNoTests
           else
-            # Defaults when no config file
-            echo "basic_enabled=true" >> $GITHUB_OUTPUT
-            echo "lint_enabled=true" >> $GITHUB_OUTPUT
-            echo "typecheck_enabled=true" >> $GITHUB_OUTPUT
-            echo "vitest_enabled=true" >> $GITHUB_OUTPUT
-            echo "e2e_enabled=false" >> $GITHUB_OUTPUT
-            echo "reviews_enabled=false" >> $GITHUB_OUTPUT
-            echo "requirements_review=false" >> $GITHUB_OUTPUT
-            echo "rules_review=false" >> $GITHUB_OUTPUT
-            echo "project_memory_review=false" >> $GITHUB_OUTPUT
-            echo "agents_review=false" >> $GITHUB_OUTPUT
-            echo "skills_review=false" >> $GITHUB_OUTPUT
-            echo "playwright_ui_review=false" >> $GITHUB_OUTPUT
-            echo "deployment_enabled=false" >> $GITHUB_OUTPUT
+            echo "No vitest config found, skipping"
           fi
 
-  # =============================================================================
-  # STAGE 2: Basic CI (Lint, Typecheck, Unit Tests)
-  # =============================================================================
-  changed-files:
-    name: Detect Changed Files
-    needs: config
-    if: needs.config.outputs.basic_enabled == 'true'
+  e2e:
+    name: "Tests / E2E (Playwright)"
+    needs: [lint, unit]
+    if: needs.lint.outputs.has_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect package manager
+        id: detect
+        run: |
+          PM="npm"
+          [ -f "bun.lockb" ] || [ -f "bun.lock" ] && PM="bun"
+          [ -f "pnpm-lock.yaml" ] && PM="pnpm"
+          [ -f "yarn.lock" ] && PM="yarn"
+          echo "pm=$PM" >> $GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.pm != 'bun'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.detect.outputs.pm == 'bun'
+
+      - name: Install dependencies
+        run: |
+          case "${{ steps.detect.outputs.pm }}" in
+            bun) bun install --frozen-lockfile ;;
+            pnpm) corepack enable && pnpm install --frozen-lockfile ;;
+            yarn) yarn --frozen-lockfile ;;
+            *) npm ci ;;
+          esac
+
+      - run: npx playwright install chromium --with-deps
+
+      - name: Run E2E tests
+        run: |
+          mkdir -p .claude/screenshots
+          npx playwright test --project=chromium --screenshot=on
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-screenshots-${{ github.sha }}
+          path: .claude/screenshots/
+          retention-days: 7
+
+  # ============================================
+  # REVIEWS (requires Tests, PR only)
+  # ============================================
+  requirements:
+    name: "Reviews / Requirements"
+    needs: [unit, e2e]
+    if: github.event_name == 'pull_request' && !failure() && !cancelled()
     runs-on: ubuntu-latest
     outputs:
-      has_ts_files: ${{ steps.filter.outputs.has_ts_files }}
-      has_test_files: ${{ steps.filter.outputs.has_test_files }}
-      ts_files: ${{ steps.filter.outputs.ts_files }}
-      test_files: ${{ steps.filter.outputs.test_files }}
+      passed: ${{ steps.extract.outputs.passed }}
+      result: ${{ steps.extract.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      - name: Get context
+        id: context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+          # Extract issue number
+          ISSUE=""
+          [[ $BRANCH =~ ^([0-9]+)- ]] && ISSUE="${BASH_REMATCH[1]}"
+          [[ $BRANCH =~ ^(feature|fix)/([0-9]+) ]] && ISSUE="${BASH_REMATCH[2]}"
+          echo "issue=$ISSUE" >> $GITHUB_OUTPUT
+
+          # Get changed files
+          gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > /tmp/changed.txt
+
+          # Get issue context
+          if [ -n "$ISSUE" ]; then
+            gh issue view $ISSUE --json title,body > /tmp/issue.json 2>/dev/null || echo "{}" > /tmp/issue.json
+          fi
+
+      - name: Run review
+        id: review
+        uses: anthropics/claude-code-base-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_tools: "View,GlobTool,Grep,Bash(git diff:*),Bash(cat:*)"
+          max_turns: 15
+          prompt: |
+            # Requirements Review
+            Check if changes align with issue requirements.
+            - Changed files: /tmp/changed.txt
+            - Issue context: /tmp/issue.json
+            Output ```json {"passed": bool, "summary": "..."} ```
+
+      - name: Extract result
+        id: extract
+        run: |
+          EXEC="${{ steps.review.outputs.execution_file }}"
+          if [ -f "$EXEC" ]; then
+            TEXT=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' "$EXEC")
+            JSON=$(echo "$TEXT" | sed -n '/```json/,/```/{/```/d;p;}')
+            if echo "$JSON" | jq . >/dev/null 2>&1; then
+              echo "$JSON" > /tmp/result.json
+              echo "passed=$(jq -r '.passed // true' /tmp/result.json)" >> $GITHUB_OUTPUT
+              echo "result=$(jq -c '.' /tmp/result.json)" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo 'result={"passed":true,"summary":"Review completed"}' >> $GITHUB_OUTPUT
+
+      - name: Update review comment
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MARKER="<!-- ci-review-${{ github.sha }} -->"
+          PR="${{ github.event.pull_request.number }}"
+          REVIEW="Requirements"
+          PASSED="${{ steps.extract.outputs.passed }}"
+          RESULT='${{ steps.extract.outputs.result }}'
+
+          STATUS="✓"
+          [ "$PASSED" != "true" ] && STATUS="✗"
+          SUMMARY=$(echo "$RESULT" | jq -r '.summary // "N/A"' 2>/dev/null || echo "N/A")
+
+          ROW="| $REVIEW | $STATUS | $SUMMARY |"
+
+          # Check for existing comment
+          EXISTING=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | {id: .id, body: .body}" | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
+            OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
+            # Append new row
+            NEW_BODY=$(echo "$OLD_BODY" | sed "/^| $REVIEW |/d")
+            NEW_BODY="$NEW_BODY
+          $ROW"
+            gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
+          else
+            # Create new comment
+            COMMENT="$MARKER
+          ## Reviews
+
+          | Review | Status | Summary |
+          |--------|--------|---------|
+          $ROW
+
+          ---
+          *Claude Code CI*"
+            gh pr comment "$PR" --body "$COMMENT"
+          fi
+
+  code-quality:
+    name: "Reviews / Code Quality"
+    needs: [requirements]
+    if: github.event_name == 'pull_request' && needs.requirements.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.extract.outputs.passed }}
+      result: ${{ steps.extract.outputs.result }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Get changed files
-        id: filter
-        uses: ./.github/actions/changed-files
-        with:
-          pattern: '\.(ts|tsx|js|jsx|test\.ts|test\.tsx)$'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > /tmp/changed.txt
 
-  lint:
-    name: CI / Lint
-    needs: [config, changed-files]
-    if: |
-      always() &&
-      needs.config.result == 'success' &&
-      needs.changed-files.result == 'success' &&
-      needs.config.outputs.lint_enabled == 'true' &&
-      needs.changed-files.outputs.has_ts_files == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: constellos/.github/actions/lint@main
+      - name: Run review
+        id: review
+        uses: anthropics/claude-code-base-action@beta
         with:
-          files: ${{ needs.changed-files.outputs.ts_files }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_tools: "View,GlobTool,Grep,Bash(git diff:*),Bash(cat:*)"
+          max_turns: 15
+          prompt: |
+            # Code Quality Review
+            Evaluate DRY, YAGNI, modularity for files in /tmp/changed.txt
+            Output ```json {"passed": bool, "summary": "..."} ```
 
-  typecheck:
-    name: CI / Typecheck
-    needs: [config, changed-files]
-    if: |
-      always() &&
-      needs.config.result == 'success' &&
-      needs.changed-files.result == 'success' &&
-      needs.config.outputs.typecheck_enabled == 'true' &&
-      needs.changed-files.outputs.has_ts_files == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: constellos/.github/actions/typecheck@main
-        with:
-          files: ${{ needs.changed-files.outputs.ts_files }}
-
-  unit-tests:
-    name: CI / Unit Tests
-    needs: [config, changed-files]
-    if: |
-      always() &&
-      needs.config.result == 'success' &&
-      needs.changed-files.result == 'success' &&
-      needs.config.outputs.vitest_enabled == 'true' &&
-      needs.changed-files.outputs.has_test_files == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: constellos/.github/actions/unit-tests@main
-        with:
-          files: ${{ needs.changed-files.outputs.test_files }}
-
-  basic-ci-complete:
-    name: Basic CI Complete
-    needs: [config, changed-files, lint, typecheck, unit-tests]
-    if: always()
-    runs-on: ubuntu-latest
-    outputs:
-      success: ${{ steps.check.outputs.success }}
-    steps:
-      - name: Check basic CI results
-        id: check
+      - name: Extract result
+        id: extract
         run: |
-          # Check if all enabled checks passed or were skipped
-          LINT_RESULT="${{ needs.lint.result }}"
-          TYPECHECK_RESULT="${{ needs.typecheck.result }}"
-          UNIT_TESTS_RESULT="${{ needs.unit-tests.result }}"
-
-          echo "Lint: $LINT_RESULT"
-          echo "Typecheck: $TYPECHECK_RESULT"
-          echo "Unit Tests: $UNIT_TESTS_RESULT"
-
-          # Success if all are success or skipped
-          if [[ "$LINT_RESULT" == "failure" ]] || \
-             [[ "$TYPECHECK_RESULT" == "failure" ]] || \
-             [[ "$UNIT_TESTS_RESULT" == "failure" ]]; then
-            echo "success=false" >> $GITHUB_OUTPUT
-            echo "::error::Basic CI failed"
-            exit 1
+          EXEC="${{ steps.review.outputs.execution_file }}"
+          if [ -f "$EXEC" ]; then
+            TEXT=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' "$EXEC")
+            JSON=$(echo "$TEXT" | sed -n '/```json/,/```/{/```/d;p;}')
+            if echo "$JSON" | jq . >/dev/null 2>&1; then
+              echo "$JSON" > /tmp/result.json
+              echo "passed=$(jq -r '.passed // true' /tmp/result.json)" >> $GITHUB_OUTPUT
+              echo "result=$(jq -c '.' /tmp/result.json)" >> $GITHUB_OUTPUT
+              exit 0
+            fi
           fi
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo 'result={"passed":true,"summary":"Review completed"}' >> $GITHUB_OUTPUT
 
-          echo "success=true" >> $GITHUB_OUTPUT
-
-  # =============================================================================
-  # STAGE 3: E2E Tests (conditional on e2e.enabled and basic-ci passing)
-  # =============================================================================
-  e2e-tests:
-    name: E2E Tests
-    needs: [config, basic-ci-complete]
-    if: |
-      always() &&
-      needs.config.outputs.e2e_enabled == 'true' &&
-      needs.basic-ci-complete.result == 'success' &&
-      needs.basic-ci-complete.outputs.success == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      tests_passed: ${{ steps.result.outputs.passed }}
-      screenshot_count: ${{ steps.screenshots.outputs.count }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
-
-      - name: Wait for deployment
-        if: needs.config.outputs.deployment_enabled == 'true'
-        run: |
-          echo "Waiting for deployment to be ready..."
-          # Deployment monitoring would be integrated here
-          # For now, we proceed without waiting
-          sleep 5
-
-      - name: Run Playwright tests
-        id: playwright
-        continue-on-error: true
-        run: |
-          mkdir -p .playwright-screenshots
-          npx playwright test \
-            --project=chromium \
-            --reporter=list,html \
-            --screenshot=on \
-            --output=.playwright-screenshots \
-            2>&1 | tee playwright-output.txt
-
-      - name: Collect screenshots
-        id: screenshots
-        run: |
-          mkdir -p .claude/screenshots
-
-          find .playwright-screenshots -name "*.png" -type f 2>/dev/null | while read -r file; do
-            UNIQUE_NAME=$(echo "$file" | sed 's/[\/\.]/_/g' | sed 's/^_//')
-            cp "$file" ".claude/screenshots/${UNIQUE_NAME}.png"
-          done
-
-          if [ -d "test-results" ]; then
-            find test-results -name "*.png" -type f 2>/dev/null | while read -r file; do
-              UNIQUE_NAME=$(echo "$file" | sed 's/[\/\.]/_/g' | sed 's/^_//')
-              cp "$file" ".claude/screenshots/${UNIQUE_NAME}.png" 2>/dev/null || true
-            done
-          fi
-
-          COUNT=$(ls -1 .claude/screenshots/*.png 2>/dev/null | wc -l || echo "0")
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-
-          ls -la .claude/screenshots/ > .claude/screenshot-manifest.txt 2>/dev/null || echo "No screenshots" > .claude/screenshot-manifest.txt
-
-      - name: Upload screenshots artifact
-        if: steps.screenshots.outputs.count > 0
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-screenshots-${{ github.sha }}
-          path: .claude/screenshots/
-          retention-days: 7
-
-      - name: Upload test results
+      - name: Update review comment
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-${{ github.sha }}
-          path: playwright-report/
-          retention-days: 7
-
-      - name: Set result
-        id: result
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ steps.playwright.outcome }}" = "success" ]; then
-            echo "passed=true" >> $GITHUB_OUTPUT
+          MARKER="<!-- ci-review-${{ github.sha }} -->"
+          PR="${{ github.event.pull_request.number }}"
+          REVIEW="Code Quality"
+          PASSED="${{ steps.extract.outputs.passed }}"
+          RESULT='${{ steps.extract.outputs.result }}'
+
+          STATUS="✓"
+          [ "$PASSED" != "true" ] && STATUS="✗"
+          SUMMARY=$(echo "$RESULT" | jq -r '.summary // "N/A"' 2>/dev/null || echo "N/A")
+
+          ROW="| $REVIEW | $STATUS | $SUMMARY |"
+
+          # Check for existing comment
+          EXISTING=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | {id: .id, body: .body}" | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
+            OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
+            # Append new row before the footer
+            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\
+          $ROW")
+            gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
           else
-            echo "passed=false" >> $GITHUB_OUTPUT
-            echo "::error::E2E tests failed"
-            exit 1
+            # Create new comment (shouldn't happen as requirements runs first)
+            COMMENT="$MARKER
+          ## Reviews
+
+          | Review | Status | Summary |
+          |--------|--------|---------|
+          $ROW
+
+          ---
+          *Claude Code CI*"
+            gh pr comment "$PR" --body "$COMMENT"
           fi
 
-  # =============================================================================
-  # STAGE 4: Code Reviews (runs after prerequisites pass)
-  # Only runs on pull_request events to avoid duplicates
-  # =============================================================================
-  reviews:
-    name: Code Reviews
-    needs: [config, basic-ci-complete, e2e-tests]
-    if: |
-      always() &&
-      github.event_name == 'pull_request' &&
-      needs.config.outputs.reviews_enabled == 'true' &&
-      needs.basic-ci-complete.result == 'success' &&
-      needs.basic-ci-complete.outputs.success == 'true' &&
-      (needs.e2e-tests.result == 'success' || needs.e2e-tests.result == 'skipped')
+  context:
+    name: "Reviews / Context"
+    needs: [requirements]
+    if: github.event_name == 'pull_request' && needs.requirements.outputs.passed == 'true'
     runs-on: ubuntu-latest
     outputs:
-      requirements_passed: ${{ steps.requirements.outputs.passed }}
-      requirements_summary: ${{ steps.requirements.outputs.summary }}
-      rules_passed: ${{ steps.rules.outputs.passed }}
-      rules_summary: ${{ steps.rules.outputs.summary }}
-      project_memory_passed: ${{ steps.project-memory.outputs.passed }}
-      project_memory_summary: ${{ steps.project-memory.outputs.summary }}
-      agents_passed: ${{ steps.agents.outputs.passed }}
-      agents_summary: ${{ steps.agents.outputs.summary }}
-      skills_passed: ${{ steps.skills.outputs.passed }}
-      skills_summary: ${{ steps.skills.outputs.summary }}
-      ui_passed: ${{ steps.ui.outputs.passed }}
-      ui_summary: ${{ steps.ui.outputs.summary }}
-
+      passed: ${{ steps.extract.outputs.passed }}
+      result: ${{ steps.extract.outputs.result }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Extract context
-        id: context
+      - name: Find parent CLAUDE.md files
+        id: find
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BRANCH_NAME="${{ github.head_ref || github.ref_name }}"
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > /tmp/changed.txt
 
-          # Extract issue number from branch
-          ISSUE_NUMBER=""
-          if [[ $BRANCH_NAME =~ ^(feature|fix|bugfix|hotfix)/([0-9]+) ]]; then
-            ISSUE_NUMBER="${BASH_REMATCH[2]}"
-          elif [[ $BRANCH_NAME =~ ^([0-9]+)- ]]; then
-            ISSUE_NUMBER="${BASH_REMATCH[1]}"
-          elif [[ $BRANCH_NAME =~ issue-([0-9]+) ]]; then
-            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+          > /tmp/claude_files.txt
+          while IFS= read -r file; do
+            dir=$(dirname "$file")
+            while [ "$dir" != "." ]; do
+              [ -f "$dir/CLAUDE.md" ] && echo "$dir/CLAUDE.md" >> /tmp/claude_files.txt
+              dir=$(dirname "$dir")
+            done
+            [ -f "CLAUDE.md" ] && echo "CLAUDE.md" >> /tmp/claude_files.txt
+          done < /tmp/changed.txt
+
+          sort -u /tmp/claude_files.txt -o /tmp/claude_files.txt
+          COUNT=$(wc -l < /tmp/claude_files.txt | tr -d ' ')
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Run review
+        if: steps.find.outputs.count != '0'
+        id: review
+        uses: anthropics/claude-code-base-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_tools: "View,GlobTool,Grep,Bash(cat:*)"
+          max_turns: 15
+          prompt: |
+            # Context Review
+            Check changes against CLAUDE.md files listed in /tmp/claude_files.txt
+            Changed files: /tmp/changed.txt
+            Output ```json {"passed": bool, "summary": "..."} ```
+
+      - name: Extract result
+        id: extract
+        run: |
+          if [ "${{ steps.find.outputs.count }}" = "0" ]; then
+            echo "passed=true" >> $GITHUB_OUTPUT
+            echo 'result={"passed":true,"summary":"No CLAUDE.md files to check"}' >> $GITHUB_OUTPUT
+            exit 0
           fi
-          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
 
-          # Get changed files
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            CHANGED_FILES=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' | tr '\n' ' ')
-          else
-            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | tr '\n' ' ' || echo "")
+          EXEC="${{ steps.review.outputs.execution_file }}"
+          if [ -f "$EXEC" ]; then
+            TEXT=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' "$EXEC")
+            JSON=$(echo "$TEXT" | sed -n '/```json/,/```/{/```/d;p;}')
+            if echo "$JSON" | jq . >/dev/null 2>&1; then
+              echo "$JSON" > /tmp/result.json
+              echo "passed=$(jq -r '.passed // true' /tmp/result.json)" >> $GITHUB_OUTPUT
+              echo "result=$(jq -c '.' /tmp/result.json)" >> $GITHUB_OUTPUT
+              exit 0
+            fi
           fi
-          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES" | tr ' ' '\n' > /tmp/changed_files.txt
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo 'result={"passed":true,"summary":"Review completed"}' >> $GITHUB_OUTPUT
 
-      - name: Get issue context
-        if: steps.context.outputs.issue_number != ''
+      - name: Update review comment
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ISSUE_NUM="${{ steps.context.outputs.issue_number }}"
-          gh issue view $ISSUE_NUM --json title,body,comments > /tmp/issue.json 2>/dev/null || echo "{}" > /tmp/issue.json
+          MARKER="<!-- ci-review-${{ github.sha }} -->"
+          PR="${{ github.event.pull_request.number }}"
+          REVIEW="Context"
+          PASSED="${{ steps.extract.outputs.passed }}"
+          RESULT='${{ steps.extract.outputs.result }}'
 
-          ISSUE_TITLE=$(jq -r '.title // ""' /tmp/issue.json)
-          ISSUE_BODY=$(jq -r '.body // ""' /tmp/issue.json)
-          echo "$ISSUE_TITLE" > /tmp/issue_title.txt
-          echo "$ISSUE_BODY" > /tmp/issue_body.txt
-          jq -r '.comments[]?.body // ""' /tmp/issue.json > /tmp/issue_comments.txt 2>/dev/null || echo "" > /tmp/issue_comments.txt
+          STATUS="✓"
+          [ "$PASSED" != "true" ] && STATUS="✗"
+          SUMMARY=$(echo "$RESULT" | jq -r '.summary // "N/A"' 2>/dev/null || echo "N/A")
 
-      - name: Get PR context
-        if: github.event_name == 'pull_request'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_NUM="${{ github.event.pull_request.number }}"
-          gh pr view $PR_NUM --json comments,reviews > /tmp/pr_context.json 2>/dev/null || echo "{}" > /tmp/pr_context.json
+          ROW="| $REVIEW | $STATUS | $SUMMARY |"
 
-          jq -r '.comments[]?.body // ""' /tmp/pr_context.json > /tmp/pr_comments.txt 2>/dev/null || echo "" > /tmp/pr_comments.txt
-          jq -r '.reviews[]?.body // ""' /tmp/pr_context.json > /tmp/review_comments.txt 2>/dev/null || echo "" > /tmp/review_comments.txt
+          # Check for existing comment
+          EXISTING=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | {id: .id, body: .body}" | head -1)
 
-      # Requirements Review
-      - name: Requirements Review
-        id: requirements
-        if: needs.config.outputs.requirements_review == 'true'
-        uses: anthropics/claude-code-base-action@beta
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_tools: "View,GlobTool,Grep,Bash(git diff:*),Bash(git log:*),Bash(cat:*)"
-          max_turns: 15
-          prompt: |
-            # Requirements Review Agent
-
-            Review code changes against linked issue requirements.
-
-            ## Context
-            - Branch: ${{ steps.context.outputs.branch_name }}
-            - Issue: ${{ steps.context.outputs.issue_number }}
-            - Changed Files: ${{ steps.context.outputs.changed_files }}
-
-            ## Task
-            1. Read issue context from /tmp/issue_title.txt, /tmp/issue_body.txt, /tmp/issue_comments.txt
-            2. Read PR context from /tmp/pr_comments.txt, /tmp/review_comments.txt
-            3. Review git diff for changed files
-            4. Compare requirements vs implementation
-            5. Output JSON with: passed, confidence, summary, requirements_met, requirements_missing
-
-            Output MUST end with ```json block containing {passed, confidence, summary}.
-
-      - name: Extract requirements result
-        id: requirements-extract
-        if: needs.config.outputs.requirements_review == 'true'
-        run: |
-          EXEC_FILE="${{ steps.requirements.outputs.execution_file }}"
-          if [ -f "$EXEC_FILE" ]; then
-            LAST_TEXT=$(jq -r '[.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""' "$EXEC_FILE" 2>/dev/null)
-            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
-            if echo "$OUTPUT" | jq . >/dev/null 2>&1 && [ -n "$OUTPUT" ]; then
-              echo "$OUTPUT" > /tmp/requirements_output.json
-            else
-              echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/requirements_output.json
-            fi
+          if [ -n "$EXISTING" ]; then
+            COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
+            OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
+            # Append new row before the footer
+            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\
+          $ROW")
+            gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
           else
-            echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/requirements_output.json
+            # Create new comment (shouldn't happen as requirements runs first)
+            COMMENT="$MARKER
+          ## Reviews
+
+          | Review | Status | Summary |
+          |--------|--------|---------|
+          $ROW
+
+          ---
+          *Claude Code CI*"
+            gh pr comment "$PR" --body "$COMMENT"
           fi
 
-          echo "passed=$(jq -r '.passed // true' /tmp/requirements_output.json)" >> $GITHUB_OUTPUT
-          echo "summary=$(jq -r '.summary // "No summary"' /tmp/requirements_output.json | head -c 200)" >> $GITHUB_OUTPUT
+  ui:
+    name: "Reviews / UI"
+    needs: [lint, requirements, e2e]
+    if: github.event_name == 'pull_request' && needs.lint.outputs.has_app == 'true' && needs.requirements.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.extract.outputs.passed }}
+      result: ${{ steps.extract.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
 
-      # Rules Review
-      - name: Rules Review
-        id: rules
-        if: needs.config.outputs.rules_review == 'true'
-        uses: anthropics/claude-code-base-action@beta
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_tools: "View,GlobTool,Grep,Bash(git diff:*),Bash(git log:*),Bash(cat:*),Bash(find:*)"
-          max_turns: 20
-          prompt: |
-            # Rules Review Agent
-
-            Review code changes against .claude/rules/*.md files.
-
-            ## Context
-            - Branch: ${{ steps.context.outputs.branch_name }}
-            - Changed Files: Read /tmp/changed_files.txt
-
-            ## Task
-            1. Find all rules in .claude/rules/
-            2. Match changed files to rules based on frontmatter path patterns
-            3. Check compliance with matched rules
-            4. Output JSON with: passed, confidence, summary, rule_evaluations
-
-            Output MUST end with ```json block containing {passed, confidence, summary}.
-
-      - name: Extract rules result
-        id: rules-extract
-        if: needs.config.outputs.rules_review == 'true'
-        run: |
-          EXEC_FILE="${{ steps.rules.outputs.execution_file }}"
-          if [ -f "$EXEC_FILE" ]; then
-            LAST_TEXT=$(jq -r '[.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""' "$EXEC_FILE" 2>/dev/null)
-            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
-            if echo "$OUTPUT" | jq . >/dev/null 2>&1 && [ -n "$OUTPUT" ]; then
-              echo "$OUTPUT" > /tmp/rules_output.json
-            else
-              echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/rules_output.json
-            fi
-          else
-            echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/rules_output.json
-          fi
-
-          echo "passed=$(jq -r '.passed // true' /tmp/rules_output.json)" >> $GITHUB_OUTPUT
-          echo "summary=$(jq -r '.summary // "No summary"' /tmp/rules_output.json | head -c 200)" >> $GITHUB_OUTPUT
-
-      # Project Memory Review
-      - name: Check memory files changed
-        id: memory-filter
-        run: |
-          if grep -qE '(^|/)CLAUDE\.md$|^\.claude/' /tmp/changed_files.txt 2>/dev/null; then
-            echo "has_memory_changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_memory_changes=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Project Memory Review
-        id: project-memory
-        if: needs.config.outputs.project_memory_review == 'true' && steps.memory-filter.outputs.has_memory_changes == 'true'
-        uses: anthropics/claude-code-base-action@beta
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*),Bash(git diff:*)"
-          max_turns: 20
-          prompt: |
-            # Project Memory Review Agent
-
-            Review changes to CLAUDE.md files for compliance.
-
-            ## Context
-            - Branch: ${{ steps.context.outputs.branch_name }}
-            - Changed Files: Read /tmp/changed_files.txt
-
-            ## Task
-            1. Find relevant CLAUDE.md files
-            2. Check changes comply with documented rules
-            3. Identify if updates are needed based on issue context
-            4. Output JSON with: passed, confidence, summary
-
-            Output MUST end with ```json block containing {passed, confidence, summary}.
-
-      - name: Extract project memory result
-        id: project-memory-extract
-        if: needs.config.outputs.project_memory_review == 'true' && steps.memory-filter.outputs.has_memory_changes == 'true'
-        run: |
-          EXEC_FILE="${{ steps.project-memory.outputs.execution_file }}"
-          if [ -f "$EXEC_FILE" ]; then
-            LAST_TEXT=$(jq -r '[.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""' "$EXEC_FILE" 2>/dev/null)
-            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
-            if echo "$OUTPUT" | jq . >/dev/null 2>&1 && [ -n "$OUTPUT" ]; then
-              echo "$OUTPUT" > /tmp/project_memory_output.json
-            else
-              echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/project_memory_output.json
-            fi
-          else
-            echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/project_memory_output.json
-          fi
-
-          echo "passed=$(jq -r '.passed // true' /tmp/project_memory_output.json)" >> $GITHUB_OUTPUT
-          echo "summary=$(jq -r '.summary // "No summary"' /tmp/project_memory_output.json | head -c 200)" >> $GITHUB_OUTPUT
-
-      # Agents Review
-      - name: Check agent files changed
-        id: agents-filter
-        run: |
-          if grep -qE '(agents/.*\.md|AGENT\.md)' /tmp/changed_files.txt 2>/dev/null; then
-            echo "has_agent_changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_agent_changes=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Agents Review
-        id: agents
-        if: needs.config.outputs.agents_review == 'true' && steps.agents-filter.outputs.has_agent_changes == 'true'
-        uses: anthropics/claude-code-base-action@beta
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*)"
-          max_turns: 15
-          prompt: |
-            # Agents Review Agent
-
-            Review .claude/agents/*.md files for quality and context optimization.
-
-            ## Context
-            - Changed Files: Read /tmp/changed_files.txt
-
-            ## Task
-            1. Read changed agent files
-            2. Check frontmatter requirements
-            3. Evaluate context efficiency, clarity, focus
-            4. Output JSON with: passed, confidence, summary, agent_evaluations
-
-            Output MUST end with ```json block containing {passed, confidence, summary}.
-
-      - name: Extract agents result
-        id: agents-extract
-        if: needs.config.outputs.agents_review == 'true' && steps.agents-filter.outputs.has_agent_changes == 'true'
-        run: |
-          EXEC_FILE="${{ steps.agents.outputs.execution_file }}"
-          if [ -f "$EXEC_FILE" ]; then
-            LAST_TEXT=$(jq -r '[.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""' "$EXEC_FILE" 2>/dev/null)
-            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
-            if echo "$OUTPUT" | jq . >/dev/null 2>&1 && [ -n "$OUTPUT" ]; then
-              echo "$OUTPUT" > /tmp/agents_output.json
-            else
-              echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/agents_output.json
-            fi
-          else
-            echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/agents_output.json
-          fi
-
-          echo "passed=$(jq -r '.passed // true' /tmp/agents_output.json)" >> $GITHUB_OUTPUT
-          echo "summary=$(jq -r '.summary // "No summary"' /tmp/agents_output.json | head -c 200)" >> $GITHUB_OUTPUT
-
-      # Skills Review
-      - name: Check skill files changed
-        id: skills-filter
-        run: |
-          if grep -qE '(skills/.*\.md|SKILL\.md)' /tmp/changed_files.txt 2>/dev/null; then
-            echo "has_skill_changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_skill_changes=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Skills Review
-        id: skills
-        if: needs.config.outputs.skills_review == 'true' && steps.skills-filter.outputs.has_skill_changes == 'true'
-        uses: anthropics/claude-code-base-action@beta
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*)"
-          max_turns: 15
-          prompt: |
-            # Skills Review Agent
-
-            Review .claude/skills/**/SKILL.md files for quality and context efficiency.
-
-            ## Context
-            - Changed Files: Read /tmp/changed_files.txt
-
-            ## Task
-            1. Read changed skill files
-            2. Check frontmatter requirements
-            3. Evaluate context efficiency, structure, documentation links
-            4. Output JSON with: passed, confidence, summary, skill_evaluations
-
-            Output MUST end with ```json block containing {passed, confidence, summary}.
-
-      - name: Extract skills result
-        id: skills-extract
-        if: needs.config.outputs.skills_review == 'true' && steps.skills-filter.outputs.has_skill_changes == 'true'
-        run: |
-          EXEC_FILE="${{ steps.skills.outputs.execution_file }}"
-          if [ -f "$EXEC_FILE" ]; then
-            LAST_TEXT=$(jq -r '[.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""' "$EXEC_FILE" 2>/dev/null)
-            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
-            if echo "$OUTPUT" | jq . >/dev/null 2>&1 && [ -n "$OUTPUT" ]; then
-              echo "$OUTPUT" > /tmp/skills_output.json
-            else
-              echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/skills_output.json
-            fi
-          else
-            echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/skills_output.json
-          fi
-
-          echo "passed=$(jq -r '.passed // true' /tmp/skills_output.json)" >> $GITHUB_OUTPUT
-          echo "summary=$(jq -r '.summary // "No summary"' /tmp/skills_output.json | head -c 200)" >> $GITHUB_OUTPUT
-
-      # Playwright UI Review (only if deployable)
-      - name: Check UI files changed
-        id: ui-filter
-        run: |
-          if grep -qE '\.(tsx|css|scss)$' /tmp/changed_files.txt 2>/dev/null; then
-            echo "has_ui_changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_ui_changes=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Download screenshots
-        if: |
-          needs.config.outputs.playwright_ui_review == 'true' &&
-          steps.ui-filter.outputs.has_ui_changes == 'true'
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: playwright-screenshots-${{ github.sha }}
           path: .claude/screenshots/
         continue-on-error: true
 
-      - name: UI Review
-        id: ui
-        if: |
-          needs.config.outputs.playwright_ui_review == 'true' &&
-          steps.ui-filter.outputs.has_ui_changes == 'true'
+      - name: Check screenshots
+        id: check
+        run: |
+          COUNT=$(ls -1 .claude/screenshots/*.png 2>/dev/null | wc -l || echo "0")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Run review
+        if: steps.check.outputs.count != '0'
+        id: review
         uses: anthropics/claude-code-base-action@beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_tools: "View,GlobTool,Grep,Bash(cat:*),Bash(find:*),Bash(ls:*)"
-          max_turns: 25
+          allowed_tools: "View,GlobTool,Bash(ls:*)"
+          max_turns: 20
           model: claude-sonnet-4-5-20250929
           prompt: |
-            # Playwright UI Review Agent
+            # UI Review
+            Review screenshots in .claude/screenshots/
+            Evaluate design, accessibility, UX
+            Output ```json {"passed": bool, "summary": "..."} ```
 
-            Review UI screenshots against best practices.
-
-            ## Context
-            - Screenshots: Check .claude/screenshots/
-            - Changed Files: Read /tmp/changed_files.txt
-
-            ## Task
-            1. View screenshots in .claude/screenshots/
-            2. Evaluate visual design, layout, accessibility, UX, elegance
-            3. Identify critical/major/minor issues
-            4. Output JSON with: passed, confidence, summary, best_practices_evaluation
-
-            Output MUST end with ```json block containing {passed, confidence, summary}.
-
-      - name: Extract UI result
-        id: ui-extract
-        if: |
-          needs.config.outputs.playwright_ui_review == 'true' &&
-          steps.ui-filter.outputs.has_ui_changes == 'true'
+      - name: Extract result
+        id: extract
         run: |
-          EXEC_FILE="${{ steps.ui.outputs.execution_file }}"
-          if [ -f "$EXEC_FILE" ]; then
-            LAST_TEXT=$(jq -r '[.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // ""' "$EXEC_FILE" 2>/dev/null)
-            OUTPUT=$(echo "$LAST_TEXT" | sed -n '/```json/,/```/{/```json/d;/```/d;p;}' | tr -d '\r')
-            if echo "$OUTPUT" | jq . >/dev/null 2>&1 && [ -n "$OUTPUT" ]; then
-              echo "$OUTPUT" > /tmp/ui_output.json
-            else
-              echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/ui_output.json
-            fi
-          else
-            echo '{"passed":true,"confidence":0.8,"summary":"Review completed"}' > /tmp/ui_output.json
+          if [ "${{ steps.check.outputs.count }}" = "0" ]; then
+            echo "passed=true" >> $GITHUB_OUTPUT
+            echo 'result={"passed":true,"summary":"No screenshots to review"}' >> $GITHUB_OUTPUT
+            exit 0
           fi
 
-          echo "passed=$(jq -r '.passed // true' /tmp/ui_output.json)" >> $GITHUB_OUTPUT
-          echo "summary=$(jq -r '.summary // "No summary"' /tmp/ui_output.json | head -c 200)" >> $GITHUB_OUTPUT
+          EXEC="${{ steps.review.outputs.execution_file }}"
+          if [ -f "$EXEC" ]; then
+            TEXT=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' "$EXEC")
+            JSON=$(echo "$TEXT" | sed -n '/```json/,/```/{/```/d;p;}')
+            if echo "$JSON" | jq . >/dev/null 2>&1; then
+              echo "$JSON" > /tmp/result.json
+              echo "passed=$(jq -r '.passed // true' /tmp/result.json)" >> $GITHUB_OUTPUT
+              echo "result=$(jq -c '.' /tmp/result.json)" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo 'result={"passed":true,"summary":"Review completed"}' >> $GITHUB_OUTPUT
 
-      # Collect all results
-      - name: Collect review outputs
-        id: collect
-        run: |
-          # Set outputs from extract steps (with defaults for skipped reviews)
-          echo "requirements_passed=${{ steps.requirements-extract.outputs.passed || 'skipped' }}" >> $GITHUB_OUTPUT
-          echo "requirements_summary=${{ steps.requirements-extract.outputs.summary || 'Skipped' }}" >> $GITHUB_OUTPUT
-          echo "rules_passed=${{ steps.rules-extract.outputs.passed || 'skipped' }}" >> $GITHUB_OUTPUT
-          echo "rules_summary=${{ steps.rules-extract.outputs.summary || 'Skipped' }}" >> $GITHUB_OUTPUT
-          echo "project_memory_passed=${{ steps.project-memory-extract.outputs.passed || 'skipped' }}" >> $GITHUB_OUTPUT
-          echo "project_memory_summary=${{ steps.project-memory-extract.outputs.summary || 'Skipped' }}" >> $GITHUB_OUTPUT
-          echo "agents_passed=${{ steps.agents-extract.outputs.passed || 'skipped' }}" >> $GITHUB_OUTPUT
-          echo "agents_summary=${{ steps.agents-extract.outputs.summary || 'Skipped' }}" >> $GITHUB_OUTPUT
-          echo "skills_passed=${{ steps.skills-extract.outputs.passed || 'skipped' }}" >> $GITHUB_OUTPUT
-          echo "skills_summary=${{ steps.skills-extract.outputs.summary || 'Skipped' }}" >> $GITHUB_OUTPUT
-          echo "ui_passed=${{ steps.ui-extract.outputs.passed || 'skipped' }}" >> $GITHUB_OUTPUT
-          echo "ui_summary=${{ steps.ui-extract.outputs.summary || 'Skipped' }}" >> $GITHUB_OUTPUT
-
-  # =============================================================================
-  # STAGE 5: Post Comment (consolidate all review results)
-  # =============================================================================
-  post-comment:
-    name: Post Review Summary
-    needs: [config, basic-ci-complete, e2e-tests, reviews]
-    if: |
-      always() &&
-      github.event_name == 'pull_request' &&
-      needs.config.outputs.reviews_enabled == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Consolidate and post comment
+      - name: Update review comment
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Gather all results
-          BASIC_CI="${{ needs.basic-ci-complete.outputs.success }}"
-          E2E_RESULT="${{ needs.e2e-tests.result }}"
-          E2E_PASSED="${{ needs.e2e-tests.outputs.tests_passed }}"
+          MARKER="<!-- ci-review-${{ github.sha }} -->"
+          PR="${{ github.event.pull_request.number }}"
+          REVIEW="UI"
+          PASSED="${{ steps.extract.outputs.passed }}"
+          RESULT='${{ steps.extract.outputs.result }}'
 
-          REQ_PASSED="${{ needs.reviews.outputs.requirements_passed }}"
-          REQ_SUMMARY="${{ needs.reviews.outputs.requirements_summary }}"
-          RULES_PASSED="${{ needs.reviews.outputs.rules_passed }}"
-          RULES_SUMMARY="${{ needs.reviews.outputs.rules_summary }}"
-          MEMORY_PASSED="${{ needs.reviews.outputs.project_memory_passed }}"
-          MEMORY_SUMMARY="${{ needs.reviews.outputs.project_memory_summary }}"
-          AGENTS_PASSED="${{ needs.reviews.outputs.agents_passed }}"
-          AGENTS_SUMMARY="${{ needs.reviews.outputs.agents_summary }}"
-          SKILLS_PASSED="${{ needs.reviews.outputs.skills_passed }}"
-          SKILLS_SUMMARY="${{ needs.reviews.outputs.skills_summary }}"
-          UI_PASSED="${{ needs.reviews.outputs.ui_passed }}"
-          UI_SUMMARY="${{ needs.reviews.outputs.ui_summary }}"
+          STATUS="✓"
+          [ "$PASSED" != "true" ] && STATUS="✗"
+          SUMMARY=$(echo "$RESULT" | jq -r '.summary // "N/A"' 2>/dev/null || echo "N/A")
 
-          # Determine overall status
-          OVERALL_PASS=true
-          if [[ "$BASIC_CI" != "true" ]]; then
-            OVERALL_PASS=false
-          fi
-          if [[ "$E2E_RESULT" == "failure" ]]; then
-            OVERALL_PASS=false
-          fi
-          if [[ "$REQ_PASSED" == "false" ]] || [[ "$RULES_PASSED" == "false" ]] || \
-             [[ "$MEMORY_PASSED" == "false" ]] || [[ "$AGENTS_PASSED" == "false" ]] || \
-             [[ "$SKILLS_PASSED" == "false" ]] || [[ "$UI_PASSED" == "false" ]]; then
-            OVERALL_PASS=false
-          fi
+          ROW="| $REVIEW | $STATUS | $SUMMARY |"
 
-          # Build status icon function
-          get_icon() {
-            case "$1" in
-              true) echo ":white_check_mark:" ;;
-              false) echo ":x:" ;;
-              skipped) echo ":white_circle:" ;;
-              *) echo ":grey_question:" ;;
-            esac
-          }
+          # Check for existing comment
+          EXISTING=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | {id: .id, body: .body}" | head -1)
 
-          if [ "$OVERALL_PASS" = "true" ]; then
-            OVERALL_ICON=":white_check_mark:"
-            OVERALL_STATUS="All Checks Passed"
+          if [ -n "$EXISTING" ]; then
+            COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
+            OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
+            # Append new row before the footer
+            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\
+          $ROW")
+            gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
           else
-            OVERALL_ICON=":x:"
-            OVERALL_STATUS="Some Checks Failed"
-          fi
+            # Create new comment (shouldn't happen as requirements runs first)
+            COMMENT="$MARKER
+          ## Reviews
 
-          # Build comment
-          COMMENT="## CI Pipeline Summary ${OVERALL_ICON}
-
-          **Status:** ${OVERALL_STATUS}
-          **Commit:** \`${{ github.sha }}\`
-
-          ### Basic CI
-          | Check | Status |
-          |-------|--------|
-          | Lint | $(get_icon $BASIC_CI) |
-          | Typecheck | $(get_icon $BASIC_CI) |
-          | Unit Tests | $(get_icon $BASIC_CI) |
-
-          ### E2E Tests
-          | Check | Status |
-          |-------|--------|
-          | Playwright | $(get_icon $E2E_PASSED) |
-          "
-
-          # Add reviews section if any ran
-          if [[ "${{ needs.config.outputs.reviews_enabled }}" == "true" ]]; then
-            COMMENT="${COMMENT}
-          ### Code Reviews
           | Review | Status | Summary |
           |--------|--------|---------|
-          | Requirements | $(get_icon $REQ_PASSED) | ${REQ_SUMMARY:-N/A} |
-          | Rules | $(get_icon $RULES_PASSED) | ${RULES_SUMMARY:-N/A} |
-          | Project Memory | $(get_icon $MEMORY_PASSED) | ${MEMORY_SUMMARY:-N/A} |
-          | Agents | $(get_icon $AGENTS_PASSED) | ${AGENTS_SUMMARY:-N/A} |
-          | Skills | $(get_icon $SKILLS_PASSED) | ${SKILLS_SUMMARY:-N/A} |
-          | UI | $(get_icon $UI_PASSED) | ${UI_SUMMARY:-N/A} |
-          "
-          fi
+          $ROW
 
-          COMMENT="${COMMENT}
           ---
-          *Automated CI Pipeline by Claude Code*
-          [View Full Run](/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-
-          # Find and update existing comment or create new one
-          COMMENT_ID=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
-            --jq '.[] | select(.body | contains("CI Pipeline Summary")) | .id' | head -1)
-
-          if [ -n "$COMMENT_ID" ]; then
-            # Update existing comment
-            gh api \
-              -X PATCH \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" \
-              -f body="$COMMENT"
-          else
-            # Create new comment
-            gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT"
+          *Claude Code CI*"
+            gh pr comment "$PR" --body "$COMMENT"
           fi
-
-  # =============================================================================
-  # Final Status Check
-  # =============================================================================
-  ci-complete:
-    name: CI Complete
-    needs: [config, basic-ci-complete, e2e-tests, reviews, post-comment]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check final status
-        run: |
-          BASIC_CI="${{ needs.basic-ci-complete.result }}"
-          E2E="${{ needs.e2e-tests.result }}"
-          REVIEWS="${{ needs.reviews.result }}"
-
-          echo "Basic CI: $BASIC_CI"
-          echo "E2E: $E2E"
-          echo "Reviews: $REVIEWS"
-
-          # Fail if any required job failed
-          if [[ "$BASIC_CI" == "failure" ]]; then
-            echo "::error::Basic CI failed"
-            exit 1
-          fi
-
-          if [[ "$E2E" == "failure" ]]; then
-            echo "::error::E2E tests failed"
-            exit 1
-          fi
-
-          if [[ "$REVIEWS" == "failure" ]]; then
-            echo "::error::Code reviews failed"
-            exit 1
-          fi
-
-          echo "All CI checks completed successfully!"
