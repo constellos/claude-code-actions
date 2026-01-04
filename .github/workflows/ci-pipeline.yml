@@ -223,6 +223,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Create review context directory
+          mkdir -p .claude/review-context
+
           BRANCH="${{ github.head_ref }}"
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
@@ -233,11 +236,11 @@ jobs:
           echo "issue=$ISSUE" >> $GITHUB_OUTPUT
 
           # Get changed files
-          gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > /tmp/changed.txt
+          gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
 
           # Get issue context
           if [ -n "$ISSUE" ]; then
-            gh issue view $ISSUE --json title,body > /tmp/issue.json 2>/dev/null || echo "{}" > /tmp/issue.json
+            gh issue view $ISSUE --json title,body > .claude/review-context/issue.json 2>/dev/null || echo "{}" > .claude/review-context/issue.json
           fi
 
       - name: Run review
@@ -250,8 +253,8 @@ jobs:
           prompt: |
             # Requirements Review
             Check if changes align with issue requirements.
-            - Changed files: /tmp/changed.txt
-            - Issue context: /tmp/issue.json
+            - Changed files: .claude/review-context/changed.txt
+            - Issue context: .claude/review-context/issue.json
             Output ```json {"passed": bool, "summary": "..."} ```
 
       - name: Extract result
@@ -332,7 +335,9 @@ jobs:
       - name: Get changed files
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > /tmp/changed.txt
+        run: |
+          mkdir -p .claude/review-context
+          gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
 
       - name: Run review
         id: review
@@ -343,7 +348,7 @@ jobs:
           max_turns: 15
           prompt: |
             # Code Quality Review
-            Evaluate DRY, YAGNI, modularity for files in /tmp/changed.txt
+            Evaluate DRY, YAGNI, modularity for files in .claude/review-context/changed.txt
             Output ```json {"passed": bool, "summary": "..."} ```
 
       - name: Extract result
@@ -425,20 +430,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > /tmp/changed.txt
+          # Create review context directory
+          mkdir -p .claude/review-context
 
-          > /tmp/claude_files.txt
+          gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
+
+          > .claude/review-context/claude_files.txt
           while IFS= read -r file; do
             dir=$(dirname "$file")
             while [ "$dir" != "." ]; do
-              [ -f "$dir/CLAUDE.md" ] && echo "$dir/CLAUDE.md" >> /tmp/claude_files.txt
+              [ -f "$dir/CLAUDE.md" ] && echo "$dir/CLAUDE.md" >> .claude/review-context/claude_files.txt
               dir=$(dirname "$dir")
             done
-            [ -f "CLAUDE.md" ] && echo "CLAUDE.md" >> /tmp/claude_files.txt
-          done < /tmp/changed.txt
+            [ -f "CLAUDE.md" ] && echo "CLAUDE.md" >> .claude/review-context/claude_files.txt
+          done < .claude/review-context/changed.txt
 
-          sort -u /tmp/claude_files.txt -o /tmp/claude_files.txt
-          COUNT=$(wc -l < /tmp/claude_files.txt | tr -d ' ')
+          sort -u .claude/review-context/claude_files.txt -o .claude/review-context/claude_files.txt
+          COUNT=$(wc -l < .claude/review-context/claude_files.txt | tr -d ' ')
           echo "count=$COUNT" >> $GITHUB_OUTPUT
 
       - name: Run review
@@ -451,8 +459,8 @@ jobs:
           max_turns: 15
           prompt: |
             # Context Review
-            Check changes against CLAUDE.md files listed in /tmp/claude_files.txt
-            Changed files: /tmp/changed.txt
+            Check changes against CLAUDE.md files listed in .claude/review-context/claude_files.txt
+            Changed files: .claude/review-context/changed.txt
             Output ```json {"passed": bool, "summary": "..."} ```
 
       - name: Extract result

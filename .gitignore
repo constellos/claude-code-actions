@@ -44,6 +44,7 @@ yarn-error.log*
 .claude/logs/
 .claude/settings.local.json
 .claude/*.local.*
+.claude/review-context/
 
 # Lock files (keep bun.lock, ignore others)
 package-lock.json
