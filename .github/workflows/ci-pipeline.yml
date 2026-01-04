@@ -193,7 +193,7 @@ jobs:
       - name: Run E2E tests
         run: |
           mkdir -p .claude/screenshots
-          npx playwright test --project=chromium --screenshot=on
+          npx playwright test --project=chromium
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -297,12 +297,12 @@ jobs:
             OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
             # Append new row
             NEW_BODY=$(echo "$OLD_BODY" | sed "/^| $REVIEW |/d")
-            NEW_BODY="$NEW_BODY
-          $ROW"
+            NEW_BODY=$(printf '%s\n%s' "$NEW_BODY" "$ROW")
             gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
           else
             # Create new comment
-            COMMENT="$MARKER
+            COMMENT=$(cat <<EOF
+          $MARKER
           ## Reviews
 
           | Review | Status | Summary |
@@ -310,7 +310,9 @@ jobs:
           $ROW
 
           ---
-          *Claude Code CI*"
+          *Claude Code CI*
+          EOF
+          )
             gh pr comment "$PR" --body "$COMMENT"
           fi
 
@@ -386,12 +388,12 @@ jobs:
             COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
             OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
             # Append new row before the footer
-            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\
-          $ROW")
+            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\$ROW")
             gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
           else
             # Create new comment (shouldn't happen as requirements runs first)
-            COMMENT="$MARKER
+            COMMENT=$(cat <<EOF
+          $MARKER
           ## Reviews
 
           | Review | Status | Summary |
@@ -399,7 +401,9 @@ jobs:
           $ROW
 
           ---
-          *Claude Code CI*"
+          *Claude Code CI*
+          EOF
+          )
             gh pr comment "$PR" --body "$COMMENT"
           fi
 
@@ -499,12 +503,12 @@ jobs:
             COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
             OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
             # Append new row before the footer
-            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\
-          $ROW")
+            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\$ROW")
             gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
           else
             # Create new comment (shouldn't happen as requirements runs first)
-            COMMENT="$MARKER
+            COMMENT=$(cat <<EOF
+          $MARKER
           ## Reviews
 
           | Review | Status | Summary |
@@ -512,7 +516,9 @@ jobs:
           $ROW
 
           ---
-          *Claude Code CI*"
+          *Claude Code CI*
+          EOF
+          )
             gh pr comment "$PR" --body "$COMMENT"
           fi
 
@@ -602,12 +608,12 @@ jobs:
             COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
             OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
             # Append new row before the footer
-            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\
-          $ROW")
+            NEW_BODY=$(echo "$OLD_BODY" | sed "/---/i\\$ROW")
             gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
           else
             # Create new comment (shouldn't happen as requirements runs first)
-            COMMENT="$MARKER
+            COMMENT=$(cat <<EOF
+          $MARKER
           ## Reviews
 
           | Review | Status | Summary |
@@ -615,6 +621,8 @@ jobs:
           $ROW
 
           ---
-          *Claude Code CI*"
+          *Claude Code CI*
+          EOF
+          )
             gh pr comment "$PR" --body "$COMMENT"
           fi
