@@ -222,17 +222,21 @@ Reviews UX patterns, interactivity, and detects console errors.
 
 ### 6. Review Comment
 
-Manages a consolidated PR comment displaying all review results.
+Manages a consolidated PR comment displaying all review results with collapsible agent sections.
 
 **Path**: `constellos/claude-code-actions/.github/actions/review-comment@v1`
 
 **Inputs**:
-- `review_name` (required): Name of the review (e.g., "Requirements", "Visual")
+- `review_name` (required): Name of the review agent (e.g., "Code Quality", "Requirements")
 - `passed` (required): Whether review passed (true/false)
-- `result_json` (required): JSON result from review
+- `result_json` (required): JSON result with checks array
+- `checks_passed` (required): Number of checks that passed
+- `checks_failed` (required): Number of checks that failed
+- `checks_skipped` (required): Number of checks that were skipped
 - `pr_number` (required): Pull request number
 - `sha` (required): Commit SHA for unique comment marker
 - `github_token` (required): GitHub token
+- `prompt_file` (optional): Path to agent prompt file for GitHub link
 
 **Outputs**: None
 
@@ -242,15 +246,19 @@ Manages a consolidated PR comment displaying all review results.
   if: always()
   uses: constellos/claude-code-actions/.github/actions/review-comment@v1
   with:
-    review_name: 'Requirements'
+    review_name: 'Code Quality'
     passed: ${{ steps.review.outputs.passed }}
     result_json: ${{ steps.review.outputs.result }}
+    checks_passed: ${{ steps.review.outputs.checks_passed }}
+    checks_failed: ${{ steps.review.outputs.checks_failed }}
+    checks_skipped: ${{ steps.review.outputs.checks_skipped }}
     pr_number: ${{ github.event.pull_request.number }}
     sha: ${{ github.sha }}
     github_token: ${{ secrets.GITHUB_TOKEN }}
+    prompt_file: '.claude/agents/reviewers/code-quality.md'
 ```
 
-**Note**: Creates a single comment and updates it as each review completes.
+**Note**: Creates a single comment with collapsible sections per agent. Shows aggregate pass/fail counts at the top and detailed checks table per agent.
 
 ---
 
@@ -383,9 +391,13 @@ jobs:
           review_name: 'Requirements'
           passed: ${{ steps.review.outputs.passed }}
           result_json: ${{ steps.review.outputs.result }}
+          checks_passed: ${{ steps.review.outputs.checks_passed }}
+          checks_failed: ${{ steps.review.outputs.checks_failed }}
+          checks_skipped: ${{ steps.review.outputs.checks_skipped }}
           pr_number: ${{ github.event.pull_request.number }}
           sha: ${{ github.sha }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt_file: '.claude/agents/reviewers/requirements.md'
 ```
 
 **In individual repos:**

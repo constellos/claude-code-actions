@@ -27,11 +27,20 @@ inputs:
 
 outputs:
   passed:
-    description: 'Whether review passed'
+    description: 'Whether review passed (all checks passed)'
     value: ${{ steps.review.outputs.passed }}
   result:
-    description: 'JSON review result'
+    description: 'JSON review result with checks array'
     value: ${{ steps.review.outputs.result }}
+  checks_passed:
+    description: 'Number of checks that passed'
+    value: ${{ steps.review.outputs.checks_passed }}
+  checks_failed:
+    description: 'Number of checks that failed'
+    value: ${{ steps.review.outputs.checks_failed }}
+  checks_skipped:
+    description: 'Number of checks that were skipped'
+    value: ${{ steps.review.outputs.checks_skipped }}
 
 runs:
   using: 'composite'

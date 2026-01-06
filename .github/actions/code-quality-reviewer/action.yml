@@ -18,11 +18,20 @@ inputs:
 
 outputs:
   passed:
-    description: 'Whether the review passed'
+    description: 'Whether the review passed (all checks passed)'
     value: ${{ steps.extract.outputs.passed }}
   result:
     description: 'JSON result from the review'
     value: ${{ steps.extract.outputs.result }}
+  checks_passed:
+    description: 'Number of checks that passed'
+    value: ${{ steps.extract.outputs.checks_passed }}
+  checks_failed:
+    description: 'Number of checks that failed'
+    value: ${{ steps.extract.outputs.checks_failed }}
+  checks_skipped:
+    description: 'Number of checks that were skipped'
+    value: ${{ steps.extract.outputs.checks_skipped }}
 
 runs:
   using: composite
@@ -65,20 +74,38 @@ runs:
       id: extract
       shell: bash
       run: |
-        # Initialize defaults - these will be used if parsing fails
-        PASSED="true"
-        RESULT='{"passed":true,"summary":"Review completed"}'
+        # Initialize defaults
+        CHECKS_PASSED=0
+        CHECKS_FAILED=0
+        CHECKS_SKIPPED=0
+        PASSED="false"
+        RESULT='{"checks":[],"message":"Review failed to complete"}'
 
         EXEC="${{ steps.review.outputs.execution_file }}"
         if [ -f "$EXEC" ]; then
           TEXT=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' "$EXEC" 2>/dev/null || echo "")
           JSON=$(echo "$TEXT" | sed -n '/```json/,/```/{/```/d;p;}' | head -50)
           if echo "$JSON" | jq . >/dev/null 2>&1; then
-            PASSED=$(echo "$JSON" | jq -r '.passed // true')
+            # Count checks by status
+            CHECKS_PASSED=$(echo "$JSON" | jq '[.checks[]? | select(.status == "passed")] | length')
+            CHECKS_FAILED=$(echo "$JSON" | jq '[.checks[]? | select(.status == "failed")] | length')
+            CHECKS_SKIPPED=$(echo "$JSON" | jq '[.checks[]? | select(.status == "skipped")] | length')
+
+            # Only pass if ALL checks passed (no failures)
+            if [ "$CHECKS_FAILED" = "0" ] && [ "$CHECKS_PASSED" -gt "0" ]; then
+              PASSED="true"
+            elif [ "$CHECKS_FAILED" = "0" ] && [ "$CHECKS_PASSED" = "0" ] && [ "$CHECKS_SKIPPED" -gt "0" ]; then
+              # All skipped is considered a pass
+              PASSED="true"
+            fi
+
             RESULT=$(echo "$JSON" | jq -c '.')
           fi
         fi
 
-        # Always output - never skip these lines
+        # Always output
         echo "passed=$PASSED" >> $GITHUB_OUTPUT
         echo "result=$RESULT" >> $GITHUB_OUTPUT
+        echo "checks_passed=$CHECKS_PASSED" >> $GITHUB_OUTPUT
+        echo "checks_failed=$CHECKS_FAILED" >> $GITHUB_OUTPUT
+        echo "checks_skipped=$CHECKS_SKIPPED" >> $GITHUB_OUTPUT

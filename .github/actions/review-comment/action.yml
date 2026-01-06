@@ -1,5 +1,5 @@
 name: Update Review Comment
-description: Add or update a row in the consolidated CI review comment
+description: Add or update an agent review in the consolidated CI review comment
 
 branding:
   icon: 'message-square'
@@ -7,13 +7,22 @@ branding:
 
 inputs:
   review_name:
-    description: 'Name of the review (e.g., "Requirements", "Visual")'
+    description: 'Name of the review agent (e.g., "Code Quality", "Requirements")'
     required: true
   passed:
     description: 'Whether the review passed (true/false)'
     required: true
   result_json:
-    description: 'JSON result from the review with summary field'
+    description: 'JSON result with checks array'
+    required: true
+  checks_passed:
+    description: 'Number of checks that passed'
+    required: true
+  checks_failed:
+    description: 'Number of checks that failed'
+    required: true
+  checks_skipped:
+    description: 'Number of checks that were skipped'
     required: true
   pr_number:
     description: 'Pull request number'
@@ -24,41 +33,207 @@ inputs:
   github_token:
     description: 'GitHub token for API access'
     required: true
+  prompt_file:
+    description: 'Path to the agent prompt file'
+    required: false
+    default: ''
 
 runs:
   using: composite
   steps:
+    - name: Generate agent section
+      id: generate
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        REVIEW="${{ inputs.review_name }}"
+        PASSED="${{ inputs.passed }}"
+        RESULT='${{ inputs.result_json }}'
+        CHECKS_PASSED="${{ inputs.checks_passed }}"
+        CHECKS_FAILED="${{ inputs.checks_failed }}"
+        CHECKS_SKIPPED="${{ inputs.checks_skipped }}"
+        PROMPT_FILE="${{ inputs.prompt_file }}"
+
+        # Determine status emoji
+        if [ "$PASSED" = "true" ]; then
+          STATUS_EMOJI="✅"
+        else
+          STATUS_EMOJI="❌"
+        fi
+
+        # Build summary line
+        SUMMARY_PARTS=""
+        [ "$CHECKS_PASSED" -gt 0 ] && SUMMARY_PARTS="✅ $CHECKS_PASSED Passed"
+        if [ "$CHECKS_FAILED" -gt 0 ]; then
+          [ -n "$SUMMARY_PARTS" ] && SUMMARY_PARTS="$SUMMARY_PARTS / "
+          SUMMARY_PARTS="${SUMMARY_PARTS}❌ $CHECKS_FAILED Failed"
+        fi
+        if [ "$CHECKS_SKIPPED" -gt 0 ]; then
+          [ -n "$SUMMARY_PARTS" ] && SUMMARY_PARTS="$SUMMARY_PARTS / "
+          SUMMARY_PARTS="${SUMMARY_PARTS}⏭️ $CHECKS_SKIPPED Skipped"
+        fi
+
+        # Build prompt link
+        PROMPT_LINK=""
+        if [ -n "$PROMPT_FILE" ]; then
+          PROMPT_LINK="[View agent prompt](https://github.com/${{ github.repository }}/blob/${{ github.head_ref || github.ref_name }}/$PROMPT_FILE)"
+        fi
+
+        # Build checks table
+        CHECKS_TABLE="| Check | Status | Result | Reasoning |
+|-------|--------|--------|-----------|"
+
+        # Parse checks from JSON
+        CHECKS_COUNT=$(echo "$RESULT" | jq '.checks | length' 2>/dev/null || echo "0")
+
+        for i in $(seq 0 $((CHECKS_COUNT - 1))); do
+          CHECK_NAME=$(echo "$RESULT" | jq -r ".checks[$i].name // \"Check $i\"")
+          CHECK_STATUS=$(echo "$RESULT" | jq -r ".checks[$i].status // \"skipped\"")
+          CHECK_RESULT=$(echo "$RESULT" | jq -r ".checks[$i].result // \"N/A\"")
+          CHECK_REASONING=$(echo "$RESULT" | jq -r ".checks[$i].reasoning // \"N/A\"")
+
+          # Status emoji for check
+          case "$CHECK_STATUS" in
+            "passed") CHECK_EMOJI="✅" ;;
+            "failed") CHECK_EMOJI="❌" ;;
+            *) CHECK_EMOJI="⏭️" ;;
+          esac
+
+          # Get files for this check
+          FILES_COUNT=$(echo "$RESULT" | jq ".checks[$i].files | length" 2>/dev/null || echo "0")
+
+          # Build files details if present
+          FILES_DETAIL=""
+          if [ "$FILES_COUNT" -gt 0 ]; then
+            FILES_DETAIL="<details><summary>Files ($FILES_COUNT)</summary>"
+            for j in $(seq 0 $((FILES_COUNT - 1))); do
+              FILE_PATH=$(echo "$RESULT" | jq -r ".checks[$i].files[$j].path // \"\"")
+              FILE_LINE=$(echo "$RESULT" | jq -r ".checks[$i].files[$j].line // \"\"")
+              FILE_NOTE=$(echo "$RESULT" | jq -r ".checks[$i].files[$j].note // \"\"")
+
+              if [ -n "$FILE_LINE" ] && [ "$FILE_LINE" != "null" ]; then
+                FILES_DETAIL="$FILES_DETAIL<br>• \`$FILE_PATH:$FILE_LINE\` - $FILE_NOTE"
+              else
+                FILES_DETAIL="$FILES_DETAIL<br>• \`$FILE_PATH\` - $FILE_NOTE"
+              fi
+            done
+            FILES_DETAIL="$FILES_DETAIL</details>"
+          fi
+
+          # Escape pipe characters in content
+          CHECK_RESULT=$(echo "$CHECK_RESULT" | sed 's/|/\\|/g')
+          CHECK_REASONING=$(echo "$CHECK_REASONING" | sed 's/|/\\|/g')
+
+          # Add reasoning with files detail if present
+          REASONING_CELL="$CHECK_REASONING"
+          [ -n "$FILES_DETAIL" ] && REASONING_CELL="$CHECK_REASONING $FILES_DETAIL"
+
+          CHECKS_TABLE="$CHECKS_TABLE
+| $CHECK_NAME | $CHECK_EMOJI | $CHECK_RESULT | $REASONING_CELL |"
+        done
+
+        # Get optional message
+        MESSAGE=$(echo "$RESULT" | jq -r '.message // ""' 2>/dev/null)
+
+        # Build the full agent section
+        AGENT_SECTION="<details>
+<summary>$STATUS_EMOJI <strong>$REVIEW</strong> — $SUMMARY_PARTS</summary>
+
+$PROMPT_LINK
+
+$CHECKS_TABLE"
+
+        # Add message if present
+        if [ -n "$MESSAGE" ] && [ "$MESSAGE" != "" ] && [ "$MESSAGE" != "null" ]; then
+          AGENT_SECTION="$AGENT_SECTION
+
+> $MESSAGE"
+        fi
+
+        AGENT_SECTION="$AGENT_SECTION
+
+</details>"
+
+        # Save to file to preserve newlines
+        echo "$AGENT_SECTION" > /tmp/agent_section.md
+
+        # Output for debugging
+        echo "Generated agent section for $REVIEW"
+
     - name: Update review comment
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         MARKER="<!-- ci-review-${{ inputs.sha }} -->"
+        AGENT_MARKER="<!-- agent:${{ inputs.review_name }} -->"
         PR="${{ inputs.pr_number }}"
         REVIEW="${{ inputs.review_name }}"
         PASSED="${{ inputs.passed }}"
-        RESULT='${{ inputs.result_json }}'
+        CHECKS_PASSED="${{ inputs.checks_passed }}"
+        CHECKS_FAILED="${{ inputs.checks_failed }}"
 
-        STATUS="✓"
-        [ "$PASSED" != "true" ] && STATUS="✗"
-        SUMMARY=$(echo "$RESULT" | jq -r '.summary // "N/A"' 2>/dev/null || echo "N/A")
+        # Read the generated section
+        AGENT_SECTION=$(cat /tmp/agent_section.md)
 
-        ROW="| $REVIEW | $STATUS | $SUMMARY |"
+        # Wrap with markers for identification
+        AGENT_BLOCK="$AGENT_MARKER
+$AGENT_SECTION
+<!-- /agent:$REVIEW -->"
 
         # Check for existing comment
         EXISTING=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
-          --jq ".[] | select(.body | contains(\"$MARKER\")) | {id: .id, body: .body}" | head -1)
+          --jq ".[] | select(.body | contains(\"$MARKER\")) | {id: .id, body: .body}" 2>/dev/null | head -1)
 
         if [ -n "$EXISTING" ]; then
           COMMENT_ID=$(echo "$EXISTING" | jq -r '.id')
           OLD_BODY=$(echo "$EXISTING" | jq -r '.body')
-          # Remove existing row for this review and add new one
-          NEW_BODY=$(echo "$OLD_BODY" | sed "/^| $REVIEW |/d")
-          # Insert new row before footer
-          NEW_BODY=$(echo "$NEW_BODY" | sed "/^---$/i\\$ROW")
+
+          # Remove existing agent block if present
+          # Using perl for multi-line regex replacement
+          NEW_BODY=$(echo "$OLD_BODY" | perl -0777 -pe "s/<!-- agent:$REVIEW -->.*?<!-- \\/agent:$REVIEW -->\n?//gs")
+
+          # Insert new agent block before the footer
+          NEW_BODY=$(echo "$NEW_BODY" | sed "/^---$/i\\
+$AGENT_BLOCK
+")
+
+          # Recalculate aggregate stats from all agent blocks
+          TOTAL_AGENTS=$(echo "$NEW_BODY" | grep -c "<!-- agent:" || echo "0")
+          TOTAL_PASSED=$(echo "$NEW_BODY" | grep -oP '(?<=<summary>)✅' | wc -l || echo "0")
+          TOTAL_FAILED=$(echo "$NEW_BODY" | grep -oP '(?<=<summary>)❌' | wc -l || echo "0")
+
+          # Update aggregate line
+          if [ "$TOTAL_FAILED" -gt 0 ]; then
+            AGGREGATE="**$TOTAL_AGENTS Agents**: ✅ $TOTAL_PASSED Passed / ❌ $TOTAL_FAILED Failed"
+          else
+            AGGREGATE="**$TOTAL_AGENTS Agents**: ✅ $TOTAL_PASSED Passed"
+          fi
+
+          # Replace aggregate line
+          NEW_BODY=$(echo "$NEW_BODY" | sed "s/^\*\*[0-9]* Agents\*\*:.*/$AGGREGATE/")
+
           gh api --method PATCH "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$NEW_BODY"
         else
           # Create new comment
-          COMMENT=$(printf '%s\n## Reviews\n\n| Review | Status | Summary |\n|--------|--------|---------|\n%s\n\n---\n*Claude Code CI*' "$MARKER" "$ROW")
+          if [ "$PASSED" = "true" ]; then
+            AGGREGATE="**1 Agent**: ✅ 1 Passed"
+          else
+            AGGREGATE="**1 Agent**: ❌ 1 Failed"
+          fi
+
+          COMMENT="$MARKER
+## Reviews
+
+$AGGREGATE
+
+---
+
+$AGENT_BLOCK
+
+---
+*Claude Code CI*"
+
           gh pr comment "$PR" --body "$COMMENT"
         fi
