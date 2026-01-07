@@ -50,10 +50,9 @@ runs:
         BRANCH="${{ inputs.branch }}"
         echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
-        # Extract issue number from branch name
+        # Extract issue number from branch name (e.g., "123-feature-name")
         ISSUE=""
         [[ $BRANCH =~ ^([0-9]+)- ]] && ISSUE="${BASH_REMATCH[1]}"
-        [[ $BRANCH =~ ^(feature|fix)/([0-9]+) ]] && ISSUE="${BASH_REMATCH[2]}"
         echo "issue=$ISSUE" >> $GITHUB_OUTPUT
 
         # Get changed files
@@ -65,6 +64,31 @@ runs:
         else
           echo "{}" > .claude/review-context/issue.json
         fi
+
+    - name: Validate context
+      id: validate
+      shell: bash
+      run: |
+        SKIP="false"
+        SKIP_REASON=""
+
+        # Check if changed files exist and have content
+        if [ ! -s ".claude/review-context/changed.txt" ]; then
+          SKIP="true"
+          SKIP_REASON="No changed files found or unable to access PR data"
+        fi
+
+        # Check if issue context has actual content (not just {})
+        if [ ! -f ".claude/review-context/issue.json" ]; then
+          SKIP="true"
+          SKIP_REASON="Could not access context files"
+        elif [ "$(cat .claude/review-context/issue.json)" = "{}" ]; then
+          SKIP="true"
+          SKIP_REASON="No issue linked to this branch - skipping requirements review"
+        fi
+
+        echo "skip=$SKIP" >> $GITHUB_OUTPUT
+        echo "skip_reason=$SKIP_REASON" >> $GITHUB_OUTPUT
 
     - name: Load agent prompt
       id: agent
@@ -93,6 +117,7 @@ runs:
 
     - name: Run review
       id: review
+      if: steps.validate.outputs.skip != 'true'
       uses: anthropics/claude-code-base-action@beta
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
@@ -104,6 +129,26 @@ runs:
       id: extract
       shell: bash
       run: |
+        # Handle skipped case first
+        if [ "${{ steps.validate.outputs.skip }}" = "true" ]; then
+          REASON="${{ steps.validate.outputs.skip_reason }}"
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "checks_passed=0" >> $GITHUB_OUTPUT
+          echo "checks_failed=0" >> $GITHUB_OUTPUT
+          echo "checks_skipped=3" >> $GITHUB_OUTPUT
+          # Build JSON with proper escaping using jq
+          RESULT=$(jq -n --arg reason "$REASON" '{
+            checks: [
+              {name: "Completeness", status: "skipped", result: $reason, reasoning: $reason, files: []},
+              {name: "Scope", status: "skipped", result: $reason, reasoning: $reason, files: []},
+              {name: "Traceability", status: "skipped", result: $reason, reasoning: $reason, files: []}
+            ],
+            message: $reason
+          }')
+          echo "result=$(echo "$RESULT" | jq -c '.')" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
         # Initialize defaults
         CHECKS_PASSED=0
         CHECKS_FAILED=0
