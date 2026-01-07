@@ -50,10 +50,9 @@ runs:
         BRANCH="${{ inputs.branch }}"
         echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
-        # Extract issue number from branch name
+        # Extract issue number from branch name (e.g., "123-feature-name")
         ISSUE=""
         [[ $BRANCH =~ ^([0-9]+)- ]] && ISSUE="${BASH_REMATCH[1]}"
-        [[ $BRANCH =~ ^(feature|fix)/([0-9]+) ]] && ISSUE="${BASH_REMATCH[2]}"
         echo "issue=$ISSUE" >> $GITHUB_OUTPUT
 
         # Get changed files
