@@ -55,6 +55,16 @@ runs:
         CHECKS_SKIPPED="${{ inputs.checks_skipped }}"
         PROMPT_FILE="${{ inputs.prompt_file }}"
 
+        # Determine review type emoji
+        case "$REVIEW" in
+          "Requirements") REVIEW_EMOJI="📝" ;;
+          "Code Quality") REVIEW_EMOJI="🔍" ;;
+          "Context") REVIEW_EMOJI="📚" ;;
+          "Visual") REVIEW_EMOJI="🎨" ;;
+          "UX") REVIEW_EMOJI="👤" ;;
+          *) REVIEW_EMOJI="📋" ;;
+        esac
+
         # Determine status emoji
         if [ "$PASSED" = "true" ]; then
           STATUS_EMOJI="✅"
@@ -138,7 +148,7 @@ runs:
 
         # Build the full agent section
         AGENT_SECTION="<details>
-<summary>$STATUS_EMOJI <strong>$REVIEW</strong> — $SUMMARY_PARTS</summary>
+<summary>$STATUS_EMOJI $REVIEW_EMOJI <strong>$REVIEW</strong> — $SUMMARY_PARTS</summary>
 
 $PROMPT_LINK
 
@@ -224,7 +234,7 @@ $AGENT_BLOCK
           fi
 
           COMMENT="$MARKER
-## Reviews
+## 📋 Reviews
 
 $AGGREGATE
 
