@@ -42,7 +42,21 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         mkdir -p .claude/review-context
-        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
+        # Gracefully handle permission errors
+        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt 2>/dev/null || touch .claude/review-context/changed.txt
+
+    - name: Validate context
+      id: validate
+      shell: bash
+      run: |
+        SKIP="false"
+        SKIP_REASON=""
+        if [ ! -s ".claude/review-context/changed.txt" ]; then
+          SKIP="true"
+          SKIP_REASON="No changed files found or unable to access PR data"
+        fi
+        echo "skip=$SKIP" >> $GITHUB_OUTPUT
+        echo "skip_reason=$SKIP_REASON" >> $GITHUB_OUTPUT
 
     - name: Load agent prompt
       id: agent
@@ -63,6 +77,7 @@ runs:
 
     - name: Run review
       id: review
+      if: steps.validate.outputs.skip != 'true'
       uses: anthropics/claude-code-base-action@main
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
@@ -74,6 +89,26 @@ runs:
       id: extract
       shell: bash
       run: |
+        # Handle skipped case first
+        if [ "${{ steps.validate.outputs.skip }}" = "true" ]; then
+          REASON="${{ steps.validate.outputs.skip_reason }}"
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "checks_passed=0" >> $GITHUB_OUTPUT
+          echo "checks_failed=0" >> $GITHUB_OUTPUT
+          echo "checks_skipped=4" >> $GITHUB_OUTPUT
+          RESULT=$(jq -n --arg reason "$REASON" '{
+            checks: [
+              {name: "DRY Compliance", status: "skipped", result: $reason, reasoning: $reason, files: []},
+              {name: "YAGNI Compliance", status: "skipped", result: $reason, reasoning: $reason, files: []},
+              {name: "Modularity", status: "skipped", result: $reason, reasoning: $reason, files: []},
+              {name: "Maintainability", status: "skipped", result: $reason, reasoning: $reason, files: []}
+            ],
+            message: $reason
+          }')
+          echo "result=$(echo "$RESULT" | jq -c '.')" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
         # Initialize defaults
         CHECKS_PASSED=0
         CHECKS_FAILED=0

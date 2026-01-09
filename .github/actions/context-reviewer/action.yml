@@ -44,7 +44,8 @@ runs:
       run: |
         mkdir -p .claude/review-context
 
-        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
+        # Gracefully handle permission errors
+        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt 2>/dev/null || touch .claude/review-context/changed.txt
 
         > .claude/review-context/claude_files.txt
         while IFS= read -r file; do

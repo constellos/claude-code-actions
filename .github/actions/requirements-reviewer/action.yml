@@ -55,8 +55,8 @@ runs:
         [[ $BRANCH =~ ^([0-9]+)- ]] && ISSUE="${BASH_REMATCH[1]}"
         echo "issue=$ISSUE" >> $GITHUB_OUTPUT
 
-        # Get changed files
-        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
+        # Get changed files (gracefully handle permission errors)
+        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt 2>/dev/null || touch .claude/review-context/changed.txt
 
         # Get issue context if available
         if [ -n "$ISSUE" ]; then

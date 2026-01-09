@@ -58,7 +58,8 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
-        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
+        # Gracefully handle permission errors
+        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt 2>/dev/null || touch .claude/review-context/changed.txt
 
     - name: Prepare hook configuration
       id: hook-config

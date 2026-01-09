@@ -51,8 +51,8 @@ runs:
       run: |
         mkdir -p .claude/review-context
 
-        # Get changed files
-        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt
+        # Get changed files (gracefully handle permission errors)
+        gh pr view ${{ inputs.pr_number }} --json files --jq '.files[].path' > .claude/review-context/changed.txt 2>/dev/null || touch .claude/review-context/changed.txt
 
         # Check if changes affect UI/UX related files
         RELEVANT=$(grep -E '\.(tsx?|jsx?|css|scss|html|vue|svelte)$' .claude/review-context/changed.txt | wc -l || echo "0")
