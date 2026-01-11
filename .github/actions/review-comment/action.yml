@@ -65,8 +65,14 @@ runs:
           STATUS_EMOJI="⚠️"
         fi
 
-        # Build summary line - always show all three counts
-        SUMMARY_PARTS="✅ $CHECKS_PASSED passed • ❌ $CHECKS_FAILED failed • ⚠️ $CHECKS_SKIPPED skipped"
+        # Build summary line - split test: Requirements uses words only, others use emoji+number
+        if [ "$REVIEW" = "Requirements" ]; then
+          # Format A: Words only (no emoji)
+          SUMMARY_PARTS="$CHECKS_PASSED passed • $CHECKS_FAILED failed • $CHECKS_SKIPPED skipped"
+        else
+          # Format B: Emoji + number only (compact)
+          SUMMARY_PARTS="✅ $CHECKS_PASSED • ❌ $CHECKS_FAILED • ⚠️ $CHECKS_SKIPPED"
+        fi
 
         # Build prompt link
         PROMPT_LINK=""

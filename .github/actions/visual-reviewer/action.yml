@@ -162,6 +162,8 @@ runs:
         # Handle case when no screenshots exist
         if [ "${{ steps.check.outputs.count }}" = "0" ]; then
           PASSED="true"
+          CHECKS_PASSED=0
+          CHECKS_FAILED=0
           CHECKS_SKIPPED=5
           RESULT='{"checks":[{"name":"Design Consistency","status":"skipped","result":"No screenshots to review","reasoning":"No screenshots found","files":[]},{"name":"Accessibility","status":"skipped","result":"No screenshots to review","reasoning":"No screenshots found","files":[]},{"name":"Responsiveness","status":"skipped","result":"No screenshots to review","reasoning":"No screenshots found","files":[]},{"name":"Visual Polish","status":"skipped","result":"No screenshots to review","reasoning":"No screenshots found","files":[]},{"name":"Regression Detection","status":"skipped","result":"No screenshots to review","reasoning":"No screenshots found","files":[]}],"message":"No screenshots to review"}'
         else

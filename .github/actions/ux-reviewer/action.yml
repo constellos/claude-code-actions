@@ -123,6 +123,8 @@ runs:
         # Handle case when no UX-relevant changes exist
         if [ "${{ steps.context.outputs.relevant_count }}" = "0" ]; then
           PASSED="true"
+          CHECKS_PASSED=0
+          CHECKS_FAILED=0
           CHECKS_SKIPPED=5
           RESULT='{"checks":[{"name":"Error Handling","status":"skipped","result":"No UX-relevant changes","reasoning":"No UI components changed","files":[]},{"name":"Interactivity","status":"skipped","result":"No UX-relevant changes","reasoning":"No UI components changed","files":[]},{"name":"Performance Perception","status":"skipped","result":"No UX-relevant changes","reasoning":"No UI components changed","files":[]},{"name":"Navigation","status":"skipped","result":"No UX-relevant changes","reasoning":"No UI components changed","files":[]},{"name":"Accessibility Behavior","status":"skipped","result":"No UX-relevant changes","reasoning":"No UI components changed","files":[]}],"message":"No UX-relevant changes to review"}'
         else
