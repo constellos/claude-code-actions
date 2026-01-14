@@ -1,6 +1,6 @@
 {
   "enabledPlugins": {
-    "github-context@constellos": true,
+    "github-orchestration@constellos": true,
     "project-context@constellos": true
   }
 }

@@ -46,10 +46,11 @@ runs:
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        RESULT_JSON: ${{ inputs.result_json }}
       run: |
         REVIEW="${{ inputs.review_name }}"
         PASSED="${{ inputs.passed }}"
-        RESULT='${{ inputs.result_json }}'
+        RESULT="$RESULT_JSON"
         CHECKS_PASSED="${{ inputs.checks_passed }}"
         CHECKS_FAILED="${{ inputs.checks_failed }}"
         CHECKS_SKIPPED="${{ inputs.checks_skipped }}"
