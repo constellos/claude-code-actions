@@ -65,10 +65,52 @@ runs:
         if [ -f ".claude/agents/reviewers/code-quality.md" ]; then
           PROMPT=$(cat .claude/agents/reviewers/code-quality.md)
         else
-          PROMPT="# Code Quality Review
-        Evaluate code quality for files in .claude/review-context/changed.txt
-        Criteria: DRY, YAGNI, Modularity, Maintainability
-        Output json {passed: bool, summary: ...}"
+          PROMPT='# Code Quality Review
+
+        Review the changed files in .claude/review-context/changed.txt for code quality.
+
+        ## Checks to Perform
+        Evaluate each criterion and output a JSON object with a checks array:
+
+        1. **DRY Compliance** - No unnecessary code duplication
+        2. **YAGNI Compliance** - No speculative features or over-engineering
+        3. **Modularity** - Appropriate separation of concerns
+        4. **Maintainability** - Clear, readable, well-structured code
+
+        ## Required Output Format
+        ```json
+        {
+          "checks": [
+            {
+              "name": "DRY Compliance",
+              "status": "passed",
+              "reasoning": "Brief explanation of why this passed or failed",
+              "files": []
+            },
+            {
+              "name": "YAGNI Compliance",
+              "status": "passed",
+              "reasoning": "Brief explanation",
+              "files": []
+            },
+            {
+              "name": "Modularity",
+              "status": "passed",
+              "reasoning": "Brief explanation",
+              "files": []
+            },
+            {
+              "name": "Maintainability",
+              "status": "passed",
+              "reasoning": "Brief explanation",
+              "files": []
+            }
+          ]
+        }
+        ```
+
+        Set status to "passed" if the code meets the criterion, "failed" if issues found, "skipped" if not applicable.
+        For failed checks, include files array with specific locations: [{"path": "file.ts", "line": 42, "note": "Issue description"}]'
         fi
 
         echo "prompt<<ENDOFPROMPT" >> $GITHUB_OUTPUT
